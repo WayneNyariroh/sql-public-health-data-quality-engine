@@ -2,21 +2,21 @@
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 05_resolution_procedures.sql
 -- Purpose: Stored procedures and functions for managing the DQ issue lifecycle.
---          These are the write-path API that data managers and automated
---          pipelines use to act on issues found by the engine.
+--          These functions let data managers and automated pipelines act on
+--          issues found by the engine.
 --
 -- Procedures:
 --   resolve_issue()         - Mark a single issue resolved
 --   bulk_resolve_by_check() - Batch-resolve all issues from a specific check
 --   waive_issue()           - Waive an issue with documented reason
---   mark_false_positive()   - Mark as false positive and suppress future occurrences
+--   mark_false_positive()   - Mark an issue as a false positive
 --   reopen_issue()          - Reopen a resolved issue if the fix didn't hold
---   suppress_check()        - Disable a check for a specific facility temporarily
+--   suppress_check()        - Record a temporary suppression request
 --
 -- Functions (read-only):
 --   get_facility_dq_score() - Returns numeric DQ score for a single facility
 --   get_open_issues()       - Returns open issues for a facility as a result set
---   check_is_suppressed()   - Returns TRUE if a check is suppressed for facility
+--   check_is_suppressed()   - Tests whether a matching suppression request exists
 --
 -- Run after: 01_schema.sql
 -- =============================================================================
@@ -25,8 +25,8 @@ SET search_path TO public;
 
 -- ---------------------------------------------------------------------------
 -- SUPPORT TABLE: Check suppression registry
--- Allows a DQ focal person to suppress a specific check for a specific facility
--- for a defined period (e.g. during a known data migration or system outage).
+-- Stores a scoped suppression request for a defined period, for example during
+-- a known data migration or system outage. The engine does not yet apply it.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS dq_check_suppression (
     suppression_id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS dq_check_suppression (
 );
 
 COMMENT ON TABLE dq_check_suppression IS
-'Registry of temporarily suppressed DQ checks. A check suppressed here is skipped during engine runs for the specified scope and period. Requires documented reason.';
+'Registry of requested temporary DQ check suppressions. The current engine does not consult this table, so it does not skip checks. Each request requires a reason.';
 
 -- ---------------------------------------------------------------------------
 -- FUNCTION: resolve_issue
@@ -311,8 +311,8 @@ COMMENT ON FUNCTION reopen_issue IS
 
 -- ---------------------------------------------------------------------------
 -- FUNCTION: suppress_check
--- Suppresses a specific check for a facility or county for a defined period.
--- The DQ engine should query dq_check_suppression before running each check.
+-- Records a suppression request for a facility or county for a defined period.
+-- The current DQ engine does not consult this registry.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION suppress_check(
     p_check_name        VARCHAR(100),
@@ -345,7 +345,7 @@ BEGIN
         CURRENT_DATE, p_valid_until
     );
 
-    RETURN FORMAT('OK: Check ''%s'' suppressed for facility=%s / county=%s until %s by %s.',
+    RETURN FORMAT('OK: Suppression request for check ''%s'' recorded for facility=%s / county=%s until %s by %s.',
                   p_check_name,
                   COALESCE(p_facility_id::TEXT, 'n/a'),
                   COALESCE(p_county_id::TEXT, 'n/a'),
@@ -354,7 +354,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION suppress_check IS
-'Suppress a DQ check for a specific facility or county until a given date. Used during known data migrations, system outages, or retrospective data entry periods. Always requires a reason.';
+'Record a DQ check suppression request for a facility or county until a given date. It does not bypass engine checks until the engine is integrated with this registry. Requires a reason.';
 
 
 -- ---------------------------------------------------------------------------
@@ -385,8 +385,8 @@ COMMENT ON FUNCTION get_facility_dq_score IS
 
 -- ---------------------------------------------------------------------------
 -- FUNCTION: check_is_suppressed
--- Returns TRUE if a check is currently suppressed for the given facility.
--- The DQ engine calls this before running each check block.
+-- Returns TRUE if a matching active suppression request exists for the facility.
+-- The current DQ engine does not call this function.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION check_is_suppressed(
     p_check_name  VARCHAR(100),
@@ -408,7 +408,7 @@ CREATE OR REPLACE FUNCTION check_is_suppressed(
 $$;
 
 COMMENT ON FUNCTION check_is_suppressed IS
-'Returns TRUE if the given check is suppressed (via dq_check_suppression) for the specified facility, either directly or via county-level suppression.';
+'Returns TRUE when the given check has an active facility-level or county-level suppression request. The current engine does not call this function.';
 
 
 -- ---------------------------------------------------------------------------
@@ -500,7 +500,7 @@ CREATE TRIGGER trg_patient_updated_at
 
 
 -- ---------------------------------------------------------------------------
--- EXAMPLE USAGE (commented out — uncomment to test)
+-- EXAMPLE USAGE (commented out, uncomment to test)
 -- ---------------------------------------------------------------------------
 
 /*
@@ -520,7 +520,7 @@ SELECT bulk_resolve_by_check(
     23   -- county_id = Turkana
 );
 
--- Suppress the notification delay check for Turkana during NTLD-P data migration:
+-- Record a notification-delay suppression request for Turkana during NTLD-P data migration:
 SELECT suppress_check(
     'T01_tb_notification_delay',
     'data.manager',

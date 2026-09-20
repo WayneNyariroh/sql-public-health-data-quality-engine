@@ -1,10 +1,9 @@
 -- =============================================================================
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 06_scheduled_job.sql
--- Purpose: Production scheduling setup using pg_cron.
---          Also includes a lightweight wrapper function (run_dq_engine) that
---          encapsulates the full engine execution so it can be called from
---          pg_cron, Airflow, a shell script, or any external orchestrator.
+-- Purpose: pg_cron scheduling and maintenance functions.
+--          The daily job calls public.run_dq_engine(), which is defined in
+--          03_dq_engine.sql.
 --
 -- Prerequisites:
 --   pg_cron extension installed and configured in postgresql.conf:
@@ -27,84 +26,11 @@ SET search_path TO public;
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 
 -- ---------------------------------------------------------------------------
--- WRAPPER FUNCTION: run_dq_engine
--- Encapsulates the full engine as a callable function.
--- This is what pg_cron (and external orchestrators) call.
--- The engine SQL is dynamically executed so it picks up any changes to
--- 03_dq_engine.sql without needing to update this file.
---
--- Design note: rather than inlining all 30 checks here, the production
--- pattern is to store the engine SQL in a file and psql-execute it, or
--- to call each check as a named function. This wrapper provides the
--- pg_cron-friendly entry point and manages the run record lifecycle.
+-- ENGINE ENTRY POINT
+-- run_dq_engine() is defined in 03_dq_engine.sql, which must be loaded before
+-- this scheduling script. It executes all checks in one database session and
+-- is the function invoked by the daily pg_cron job below.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION run_dq_engine(
-    p_triggered_by  VARCHAR(80) DEFAULT 'pg_cron'
-) RETURNS UUID LANGUAGE plpgsql AS $$
-DECLARE
-    v_run_id            UUID;
-    v_checks_executed   INT := 0;
-    v_issues_found      INT := 0;
-    v_issues_at_start   INT;
-BEGIN
-    -- Record how many total open issues exist before this run
-    SELECT COUNT(*) INTO v_issues_at_start
-    FROM data_quality_issue WHERE status = 'open';
-
-    -- Create the run record
-    INSERT INTO dq_engine_run (triggered_by, run_notes)
-    VALUES (p_triggered_by, FORMAT('Automated run triggered by %s at %s EAT',
-                                    p_triggered_by, now() AT TIME ZONE 'Africa/Nairobi'))
-    RETURNING run_id INTO v_run_id;
-
-    -- Store for downstream use within this session
-    PERFORM set_config('dq.run_id', v_run_id::TEXT, FALSE);
-
-    RAISE NOTICE 'DQ Engine starting. run_id = %', v_run_id;
-
-    -- -----------------------------------------------------------------------
-    -- INVOKE EACH CHECK INDIVIDUALLY
-    -- In production, each check below would be a named function (e.g.
-    -- dq_check_c01_patient_missing_dob(v_run_id)). For this implementation,
-    -- we reference the check log to count executions since the engine SQL
-    -- is meant to be run as a psql script (03_dq_engine.sql).
-    --
-    -- The pattern below shows how to call named check functions if you
-    -- refactor the checks into individual stored procedures.
-    -- -----------------------------------------------------------------------
-
-    /*
-    EXAMPLE if checks were functions:
-
-    PERFORM dq_check_c01_patient_missing_dob(v_run_id);
-    PERFORM dq_check_c02_patient_sex_unknown(v_run_id);
-    PERFORM dq_check_v01_patient_dob_future(v_run_id);
-    -- ... etc for all 30 checks
-    */
-
-    -- For now, count what the engine wrote during this session
-    SELECT COUNT(DISTINCT check_name), COUNT(*)
-    INTO v_checks_executed, v_issues_found
-    FROM data_quality_issue
-    WHERE check_run_id = v_run_id;
-
-    -- Close the run record
-    UPDATE dq_engine_run
-    SET
-        run_completed_at    = now(),
-        checks_executed     = v_checks_executed,
-        issues_found        = v_issues_found
-    WHERE run_id = v_run_id;
-
-    RAISE NOTICE 'DQ Engine complete. run_id=%, checks=%, issues=%',
-        v_run_id, v_checks_executed, v_issues_found;
-
-    RETURN v_run_id;
-END;
-$$;
-
-COMMENT ON FUNCTION run_dq_engine IS
-'Entry point for the DQ engine. Creates an engine run record, executes all checks, and closes the run with a summary count. Called by pg_cron or external orchestrators.';
 
 
 -- ---------------------------------------------------------------------------
@@ -207,7 +133,7 @@ COMMENT ON FUNCTION stale_issue_alert IS
 
 -- ---------------------------------------------------------------------------
 -- MAINTENANCE FUNCTION: get_engine_health_summary
--- Quick health check for the DQ engine itself — called by monitoring tools.
+-- Quick health check for the DQ engine itself : called by monitoring tools.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION get_engine_health_summary()
 RETURNS TABLE (
@@ -254,12 +180,11 @@ COMMENT ON FUNCTION get_engine_health_summary IS
 -- ---------------------------------------------------------------------------
 
 -- Full DQ engine run: daily at 02:00 Africa/Nairobi (= 23:00 UTC previous day)
--- The actual check execution requires running 03_dq_engine.sql via psql;
--- here we schedule the wrapper + maintenance functions.
+-- The daily job calls the engine function installed by 03_dq_engine.sql.
 SELECT cron.schedule(
     'dq_engine_daily_run',
     '0 23 * * *',       -- 23:00 UTC = 02:00 EAT
-    $$SELECT run_dq_engine('pg_cron_daily');$$
+    $$SELECT public.run_dq_engine('pg_cron_daily');$$
 );
 
 -- Expired suppression cleanup: daily at 03:00 EAT (00:00 UTC)
@@ -274,8 +199,8 @@ SELECT cron.schedule(
 SELECT cron.schedule(
     'dq_stale_issue_alert',
     '0 4 * * 1',
-    $$
-        DO $$
+    $cron$
+        DO $alert$
         DECLARE
             r RECORD;
         BEGIN
@@ -285,8 +210,8 @@ SELECT cron.schedule(
                     r.stale_count, r.oldest_issue_days;
             END LOOP;
         END;
-        $$
-    $$
+        $alert$;
+    $cron$
 );
 
 -- Monthly archive job: first day of month at 04:00 EAT (01:00 UTC)

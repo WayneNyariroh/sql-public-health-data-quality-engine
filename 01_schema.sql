@@ -79,7 +79,7 @@ CREATE TABLE sub_county (
     created_at       TIMESTAMPTZ DEFAULT now()
 );
 
--- Master Facility List (MFL) - the single source of truth for facility identity
+-- Master Facility List (MFL), the reference for facility identity.
 CREATE TABLE facility (
     facility_id       SERIAL PRIMARY KEY,
     mfl_code          VARCHAR(10) UNIQUE NOT NULL,   -- official MFL code e.g. "14880"
@@ -381,6 +381,30 @@ CREATE TABLE stock_record (
 );
 
 -- ---------------------------------------------------------------------------
+-- RAW INGESTION LAYER
+-- Source extracts land here before validation. These tables deliberately copy
+-- the operational columns and defaults but omit PK, FK, UNIQUE, and CHECK
+-- constraints so imperfect source records can be assessed by the DQ engine.
+-- Master/reference data remains in public.
+-- ---------------------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS raw;
+
+CREATE TABLE raw.patient            (LIKE public.patient INCLUDING DEFAULTS);
+CREATE TABLE raw.art_enrollment     (LIKE public.art_enrollment INCLUDING DEFAULTS);
+CREATE TABLE raw.viral_load         (LIKE public.viral_load INCLUDING DEFAULTS);
+CREATE TABLE raw.art_visit          (LIKE public.art_visit INCLUDING DEFAULTS);
+CREATE TABLE raw.tb_case            (LIKE public.tb_case INCLUDING DEFAULTS);
+CREATE TABLE raw.anc_visit          (LIKE public.anc_visit INCLUDING DEFAULTS);
+CREATE TABLE raw.delivery           (LIKE public.delivery INCLUDING DEFAULTS);
+CREATE TABLE raw.chw                (LIKE public.chw INCLUDING DEFAULTS);
+CREATE TABLE raw.chw_service_record (LIKE public.chw_service_record INCLUDING DEFAULTS);
+CREATE TABLE raw.aggregate_report   (LIKE public.aggregate_report INCLUDING DEFAULTS);
+CREATE TABLE raw.stock_record       (LIKE public.stock_record INCLUDING DEFAULTS);
+
+COMMENT ON SCHEMA raw IS
+'Landing/staging schema for source extracts. Records are intentionally accepted before semantic validation by the DQ engine.';
+
+-- ---------------------------------------------------------------------------
 -- DATA QUALITY ISSUE REGISTRY
 -- The central table. Every automated check inserts rows here.
 -- ---------------------------------------------------------------------------
@@ -432,6 +456,39 @@ CREATE INDEX idx_dqi_facility      ON data_quality_issue(facility_id);
 CREATE INDEX idx_dqi_source_table  ON data_quality_issue(source_table);
 CREATE INDEX idx_dqi_check_run     ON data_quality_issue(check_run_id);
 CREATE INDEX idx_dqi_detected      ON data_quality_issue(detected_at DESC);
+
+-- Keep recurring engine runs from creating another open finding for the same
+-- check and source record. Resolved, waived, and false-positive findings may
+-- be raised again when the underlying condition recurs.
+CREATE OR REPLACE FUNCTION dqi_ignore_duplicate_open()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status IN ('open', 'confirmed') AND NEW.record_id IS NOT NULL THEN
+        -- Serialise concurrent attempts for this logical finding before the
+        -- existence check. A hash collision only serialises extra inserts.
+        PERFORM pg_advisory_xact_lock(
+            hashtext(CONCAT_WS('|', NEW.check_name, NEW.source_table, NEW.record_id))
+        );
+
+        IF EXISTS (
+            SELECT 1
+            FROM data_quality_issue dqi
+            WHERE dqi.check_name = NEW.check_name
+              AND dqi.source_table = NEW.source_table
+              AND dqi.record_id = NEW.record_id
+              AND dqi.status IN ('open', 'confirmed')
+        ) THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_dqi_ignore_duplicate_open
+BEFORE INSERT ON data_quality_issue
+FOR EACH ROW EXECUTE FUNCTION dqi_ignore_duplicate_open();
 
 -- ---------------------------------------------------------------------------
 -- DQ ENGINE AUDIT LOG

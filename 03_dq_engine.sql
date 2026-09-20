@@ -3,7 +3,7 @@
 -- File: 03_dq_engine.sql
 -- Purpose: The automated check engine. Run this as a scheduled job
 --          (pg_cron, Airflow, dbt test, or manual execution).
---          Each check is a self-contained block that:
+--          Each check runs in its own block and:
 --            1. Scans its target table/column
 --            2. Inserts issues into data_quality_issue
 --            3. Logs execution into dq_check_log
@@ -11,17 +11,19 @@
 -- Architecture:
 --   - A new dq_engine_run row is created at the top.
 --   - v_run_id captures that UUID for the entire session.
---   - Each check uses a DO $$ block so it's individually testable.
---   - run() is a helper function that centralises the INSERT + log logic.
+--   - Each check is an independently scoped PL/pgSQL block within the
+--     callable engine function, so a scheduled run is atomic and auditable.
+--   - public.dq_log_check() writes the audit log for each check.
 --
--- Check inventory (30 checks across 7 categories):
+-- Check inventory (36 checks across 7 categories):
 --
---   COMPLETENESS (5):
+--   COMPLETENESS (6):
 --     C01 - Patient missing date_of_birth
 --     C02 - Patient missing sex
 --     C03 - TB case missing treatment_start_date
 --     C04 - ART enrollment missing weight_at_start
 --     C05 - Stock record missing closing_balance
+--     C06 - Viral load result missing without an LDL flag
 --
 --   VALIDITY (8):
 --     V01 - Patient date_of_birth in the future
@@ -33,7 +35,7 @@
 --     V07 - Art visit adherence score out of 0–100 range
 --     V08 - Birth weight below 200g
 --
---   CONSISTENCY (7):
+--   CONSISTENCY (8):
 --     K01 - ANC visit recorded for male patient
 --     K02 - VL labeled 'suppressed' but result > 1000 copies/mL
 --     K03 - TB outcome = 'cured' without treatment_start
@@ -41,6 +43,7 @@
 --     K05 - Stock closing balance ≠ opening + received - dispensed - losses
 --     K06 - HTS_TST_POS > HTS_TST in same facility-period
 --     K07 - ART start date after patient's recorded date of death
+--     K08 - Patient enrollment date before date of birth
 --
 --   TIMELINESS (4):
 --     T01 - TB notification > 56 days after diagnosis
@@ -70,30 +73,13 @@
 -- ---------------------------------------------------------------------------
 -- HELPER: ensure idempotent run by committing session variables
 -- ---------------------------------------------------------------------------
-SET search_path TO public;
-
--- ---------------------------------------------------------------------------
--- STEP 1: Create engine run record and capture run_id
--- ---------------------------------------------------------------------------
-DO $$
-DECLARE
-    v_run_id UUID;
-BEGIN
-    INSERT INTO dq_engine_run (triggered_by, run_notes)
-    VALUES ('manual', 'Full engine run via 03_dq_engine.sql')
-    RETURNING run_id INTO v_run_id;
-
-    -- Store in session variable for use across subsequent DO blocks
-    PERFORM set_config('dq.run_id', v_run_id::TEXT, FALSE);
-    RAISE NOTICE 'DQ Engine run started. run_id = %', v_run_id;
-END;
-$$;
+SET search_path TO raw, public;
 
 -- ---------------------------------------------------------------------------
 -- HELPER FUNCTION: log a check execution and return issue count
 -- Creates the check log entry; the caller handles the actual DQ inserts.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION dq_log_check(
+CREATE OR REPLACE FUNCTION public.dq_log_check(
     p_run_id        UUID,
     p_check_name    VARCHAR,
     p_category      check_category,
@@ -114,6 +100,29 @@ BEGIN
     );
 END;
 $$;
+-- ---------------------------------------------------------------------------
+-- FUNCTION: run_dq_engine
+-- Runs all 36 checks in one database session. This is the callable entry point
+-- for pg_cron, Airflow, and manual SQL execution.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.run_dq_engine(
+    p_triggered_by VARCHAR(80) DEFAULT 'manual'
+) RETURNS UUID LANGUAGE plpgsql
+SET search_path TO raw, public
+AS $engine$
+DECLARE
+    v_run_id UUID;
+BEGIN
+    -- Function calls may come from pg_cron or another session whose default
+    -- path is public. Force all source-table reads to the raw ingest layer.
+    PERFORM set_config('search_path', 'raw, public', TRUE);
+
+    INSERT INTO dq_engine_run (triggered_by, run_notes)
+    VALUES (p_triggered_by, FORMAT('Full DQ engine run triggered by %s', p_triggered_by))
+    RETURNING run_id INTO v_run_id;
+
+    PERFORM set_config('dq.run_id', v_run_id::TEXT, TRUE);
+    RAISE NOTICE 'DQ Engine run started. run_id = %', v_run_id;
 
 -- =============================================================================
 -- COMPLETENESS CHECKS
@@ -125,7 +134,6 @@ $$;
 -- Age is required for paediatric vs adult regimen decisions and for cascade
 -- disaggregation by age band. Any row without a DOB is analytically blind.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -163,17 +171,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'C01_patient_missing_dob', 'completeness', 'high', 'patient', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'C01_patient_missing_dob', 'completeness', 'high', 'patient', v_scanned, v_issues);
     RAISE NOTICE 'C01 | patient missing DOB: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- C02 | COMPLETENESS | MEDIUM
 -- Patient records with sex = 'unknown'.
 -- Sex disaggregation is mandatory for PEPFAR MER, DHIS2, and KHIS reporting.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -210,10 +216,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'C02_patient_sex_unknown', 'completeness', 'medium', 'patient', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'C02_patient_sex_unknown', 'completeness', 'medium', 'patient', v_scanned, v_issues);
     RAISE NOTICE 'C02 | patient sex unknown: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- C03 | COMPLETENESS | CRITICAL
@@ -221,7 +226,6 @@ $$;
 -- Treatment start is the anchor for cohort analysis and treatment success
 -- rate calculations. Missing it invalidates the entire outcome record.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -261,17 +265,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'C03_tb_missing_treatment_start', 'completeness', 'critical', 'tb_case', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'C03_tb_missing_treatment_start', 'completeness', 'critical', 'tb_case', v_scanned, v_issues);
     RAISE NOTICE 'C03 | TB missing treatment start: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- C04 | COMPLETENESS | MEDIUM
 -- ART enrollments missing weight_at_start.
 -- Required for paediatric dosing and nutritional status assessment.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -309,10 +311,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'C04_art_missing_weight', 'completeness', 'medium', 'art_enrollment', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'C04_art_missing_weight', 'completeness', 'medium', 'art_enrollment', v_scanned, v_issues);
     RAISE NOTICE 'C04 | ART missing weight_at_start: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- C05 | COMPLETENESS | HIGH
@@ -320,7 +321,6 @@ $$;
 -- Closing balance is needed to compute months of stock remaining.
 -- A NULL with days_out_of_stock = 0 means the entry is simply incomplete.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -359,10 +359,57 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'C05_stock_missing_closing_balance', 'completeness', 'high', 'stock_record', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'C05_stock_missing_closing_balance', 'completeness', 'high', 'stock_record', v_scanned, v_issues);
     RAISE NOTICE 'C05 | Stock missing closing_balance: % issues', v_issues;
 END;
-$$;
+
+-- ---------------------------------------------------------------------------
+-- C06 | COMPLETENESS | HIGH
+-- Viral-load results that are NULL without the low-detectable-level flag.
+-- A missing result must be distinguished from an intentionally unquantified
+-- LDL result before suppression and treatment decisions are reported.
+-- ---------------------------------------------------------------------------
+DECLARE
+    v_run_id    UUID := current_setting('dq.run_id')::UUID;
+    v_issues    INT;
+    v_scanned   INT;
+BEGIN
+    SELECT COUNT(*) INTO v_scanned FROM viral_load;
+
+    WITH bad AS (
+        INSERT INTO data_quality_issue (
+            check_name, check_category, severity,
+            source_table, source_column, record_id,
+            facility_id, county_id,
+            issue_description, raw_value, expected_value,
+            check_run_id, data_source
+        )
+        SELECT
+            'C06_vl_result_missing_without_ldl',
+            'completeness',
+            'high',
+            'viral_load',
+            'vl_result',
+            vl.vl_id::TEXT,
+            vl.facility_id,
+            f.county_id,
+            FORMAT('Viral-load record %s for patient %s has no result and is not marked as LDL.',
+                   vl.vl_id, vl.patient_id),
+            NULL,
+            'A numeric vl_result or is_ldl = TRUE',
+            v_run_id,
+            vl.data_source
+        FROM viral_load vl
+        JOIN facility f ON vl.facility_id = f.facility_id
+        WHERE vl.vl_result IS NULL
+          AND COALESCE(vl.is_ldl, FALSE) = FALSE
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_issues FROM bad;
+
+    PERFORM public.dq_log_check(v_run_id, 'C06_vl_result_missing_without_ldl', 'completeness', 'high', 'viral_load', v_scanned, v_issues);
+    RAISE NOTICE 'C06 | VL result missing without LDL flag: % issues', v_issues;
+END;
 
 -- =============================================================================
 -- VALIDITY CHECKS
@@ -372,7 +419,6 @@ $$;
 -- V01 | VALIDITY | CRITICAL
 -- Patient date_of_birth is in the future.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -410,17 +456,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V01_patient_dob_future', 'validity', 'critical', 'patient', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V01_patient_dob_future', 'validity', 'critical', 'patient', v_scanned, v_issues);
     RAISE NOTICE 'V01 | Patient DOB in future: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V02 | VALIDITY | CRITICAL
 -- ART start date is before the patient's enrollment date.
 -- A patient cannot be on ART before they exist in the system.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -460,17 +504,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V02_art_start_before_enrollment', 'validity', 'critical', 'art_enrollment', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V02_art_start_before_enrollment', 'validity', 'critical', 'art_enrollment', v_scanned, v_issues);
     RAISE NOTICE 'V02 | ART start before enrollment: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V03 | VALIDITY | CRITICAL
 -- Negative CD4 count at ART enrollment.
 -- CD4 < 0 is biologically impossible.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -508,17 +550,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V03_negative_cd4_count', 'validity', 'critical', 'art_enrollment', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V03_negative_cd4_count', 'validity', 'critical', 'art_enrollment', v_scanned, v_issues);
     RAISE NOTICE 'V03 | Negative CD4 count: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V04 | VALIDITY | HIGH
 -- Viral load result_date is before sample_date.
 -- A lab cannot report a result before receiving the sample.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -556,16 +596,14 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V04_vl_result_before_sample', 'validity', 'high', 'viral_load', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V04_vl_result_before_sample', 'validity', 'high', 'viral_load', v_scanned, v_issues);
     RAISE NOTICE 'V04 | VL result before sample: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V05 | VALIDITY | HIGH
 -- ANC gestational age > 44 weeks. Human pregnancy does not exceed ~44 weeks.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -603,17 +641,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V05_anc_gestational_age_impossible', 'validity', 'high', 'anc_visit', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V05_anc_gestational_age_impossible', 'validity', 'high', 'anc_visit', v_scanned, v_issues);
     RAISE NOTICE 'V05 | ANC impossible gestational age: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V06 | VALIDITY | HIGH
 -- Aggregate report with a negative value.
 -- Counts and rates cannot be negative.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -653,16 +689,14 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V06_aggregate_negative_value', 'validity', 'high', 'aggregate_report', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V06_aggregate_negative_value', 'validity', 'high', 'aggregate_report', v_scanned, v_issues);
     RAISE NOTICE 'V06 | Aggregate negative value: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V07 | VALIDITY | MEDIUM
 -- ART visit adherence score outside 0–100 range.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -700,10 +734,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V07_adherence_score_out_of_range', 'validity', 'medium', 'art_visit', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V07_adherence_score_out_of_range', 'validity', 'medium', 'art_visit', v_scanned, v_issues);
     RAISE NOTICE 'V07 | Adherence score out of range: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- V08 | VALIDITY | HIGH
@@ -711,7 +744,6 @@ $$;
 -- but legacy/migrated data may pre-date the constraint. This check catches
 -- anything that bypasses it (e.g. direct table copies, bulk inserts).
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -749,10 +781,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'V08_birth_weight_below_minimum', 'validity', 'high', 'delivery', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'V08_birth_weight_below_minimum', 'validity', 'high', 'delivery', v_scanned, v_issues);
     RAISE NOTICE 'V08 | Birth weight below minimum: % issues', v_issues;
 END;
-$$;
 
 -- =============================================================================
 -- CONSISTENCY CHECKS
@@ -763,7 +794,6 @@ $$;
 -- ANC visit recorded against a male patient.
 -- ANC services are for pregnant women only.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -802,10 +832,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K01_anc_on_male_patient', 'consistency', 'high', 'anc_visit', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K01_anc_on_male_patient', 'consistency', 'high', 'anc_visit', v_scanned, v_issues);
     RAISE NOTICE 'K01 | ANC on male patient: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- K02 | CONSISTENCY | CRITICAL
@@ -813,7 +842,6 @@ $$;
 -- WHO defines virological suppression as VL < 1000 copies/mL.
 -- This mislabeling directly corrupts VL suppression rate indicators.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -853,17 +881,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K02_vl_suppressed_mislabeled', 'consistency', 'critical', 'viral_load', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K02_vl_suppressed_mislabeled', 'consistency', 'critical', 'viral_load', v_scanned, v_issues);
     RAISE NOTICE 'K02 | VL suppressed mislabeled: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- K03 | CONSISTENCY | HIGH
 -- TB treatment outcome = 'cured' or 'treatment_completed' but treatment_start is NULL.
 -- You cannot be cured from treatment you never started.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -902,10 +928,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K03_tb_cured_no_treatment_start', 'consistency', 'high', 'tb_case', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K03_tb_cured_no_treatment_start', 'consistency', 'high', 'tb_case', v_scanned, v_issues);
     RAISE NOTICE 'K03 | TB cured/outcome without treatment start: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- K04 | CONSISTENCY | HIGH
@@ -913,7 +938,6 @@ $$;
 -- Mother-to-child transmission cannot occur if the mother is HIV-negative.
 -- (Note: 'unknown' status is allowed.)
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -952,17 +976,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K04_mtct_inconsistency', 'consistency', 'high', 'delivery', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K04_mtct_inconsistency', 'consistency', 'high', 'delivery', v_scanned, v_issues);
     RAISE NOTICE 'K04 | MTCT inconsistency: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- K05 | CONSISTENCY | HIGH
 -- Stock closing balance ≠ opening + received - dispensed - losses_adjustments.
 -- Arithmetic must hold. A discrepancy > 1 unit (rounding tolerance) is flagged.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1009,17 +1031,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K05_stock_balance_arithmetic', 'consistency', 'high', 'stock_record', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K05_stock_balance_arithmetic', 'consistency', 'high', 'stock_record', v_scanned, v_issues);
     RAISE NOTICE 'K05 | Stock balance arithmetic error: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- K06 | CONSISTENCY | CRITICAL
 -- HTS_TST_POS > HTS_TST for the same facility-period.
 -- Positives cannot exceed total tests.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1079,16 +1099,14 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K06_pos_exceeds_total_tests', 'consistency', 'critical', 'aggregate_report', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K06_pos_exceeds_total_tests', 'consistency', 'critical', 'aggregate_report', v_scanned, v_issues);
     RAISE NOTICE 'K06 | HTS_TST_POS exceeds HTS_TST: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- K07 | CONSISTENCY | CRITICAL
 -- ART start date is after the patient's recorded date of death.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1131,10 +1149,56 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'K07_art_after_death', 'consistency', 'critical', 'art_enrollment', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'K07_art_after_death', 'consistency', 'critical', 'art_enrollment', v_scanned, v_issues);
     RAISE NOTICE 'K07 | ART after patient death: % issues', v_issues;
 END;
-$$;
+
+-- ---------------------------------------------------------------------------
+-- K08 | CONSISTENCY | HIGH
+-- A patient cannot be enrolled before their recorded date of birth.
+-- This corrupts age-at-enrolment calculations and cohort disaggregation.
+-- ---------------------------------------------------------------------------
+DECLARE
+    v_run_id    UUID := current_setting('dq.run_id')::UUID;
+    v_issues    INT;
+    v_scanned   INT;
+BEGIN
+    SELECT COUNT(*) INTO v_scanned FROM patient WHERE date_of_birth IS NOT NULL;
+
+    WITH bad AS (
+        INSERT INTO data_quality_issue (
+            check_name, check_category, severity,
+            source_table, source_column, record_id,
+            facility_id, county_id,
+            issue_description, raw_value, expected_value,
+            check_run_id, data_source
+        )
+        SELECT
+            'K08_patient_enrolled_before_birth',
+            'consistency',
+            'high',
+            'patient',
+            'date_enrolled',
+            p.patient_id::TEXT,
+            p.facility_id,
+            f.county_id,
+            FORMAT('Patient %s was enrolled on %s before recorded date_of_birth %s.',
+                   p.nupi_number, p.date_enrolled, p.date_of_birth),
+            p.date_enrolled::TEXT,
+            'date_enrolled >= date_of_birth',
+            v_run_id,
+            p.data_source
+        FROM patient p
+        JOIN facility f ON p.facility_id = f.facility_id
+        WHERE p.date_of_birth IS NOT NULL
+          AND p.date_enrolled < p.date_of_birth
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_issues FROM bad;
+
+    PERFORM public.dq_log_check(v_run_id, 'K08_patient_enrolled_before_birth', 'consistency', 'high', 'patient', v_scanned, v_issues);
+    RAISE NOTICE 'K08 | Patient enrolled before birth: % issues', v_issues;
+END;
 
 -- =============================================================================
 -- TIMELINESS CHECKS
@@ -1146,7 +1210,6 @@ $$;
 -- Kenya NTLD-P guidelines require notification within 2 weeks of diagnosis.
 -- 56 days (WHO threshold) is used as the outer bound.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1187,10 +1250,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'T01_tb_notification_delay', 'timeliness', 'high', 'tb_case', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'T01_tb_notification_delay', 'timeliness', 'high', 'tb_case', v_scanned, v_issues);
     RAISE NOTICE 'T01 | TB notification delay: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- T02 | TIMELINESS | HIGH
@@ -1198,7 +1260,6 @@ $$;
 -- KHIS/DHIS2 deadline is typically the 15th of the following month.
 -- 60 days catches chronic late submitters.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1257,17 +1318,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'T02_aggregate_late_submission', 'timeliness', 'high', 'aggregate_report', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'T02_aggregate_late_submission', 'timeliness', 'high', 'aggregate_report', v_scanned, v_issues);
     RAISE NOTICE 'T02 | Aggregate late submission: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- T03 | TIMELINESS | MEDIUM
 -- CHW service record created > 30 days after service_date.
 -- CHW mobile tools should sync within 7 days; 30-day threshold catches stale entries.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1308,17 +1367,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'T03_chw_late_sync', 'timeliness', 'medium', 'chw_service_record', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'T03_chw_late_sync', 'timeliness', 'medium', 'chw_service_record', v_scanned, v_issues);
     RAISE NOTICE 'T03 | CHW late sync: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- T04 | TIMELINESS | MEDIUM
 -- ART patient overdue: next_appointment was > 90 days ago with no subsequent visit.
 -- This flags patients who may have been lost to follow-up (LTFU).
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1369,10 +1426,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'T04_art_patient_overdue', 'timeliness', 'medium', 'art_visit', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'T04_art_patient_overdue', 'timeliness', 'medium', 'art_visit', v_scanned, v_issues);
     RAISE NOTICE 'T04 | ART patient overdue (possible LTFU): % issues', v_issues;
 END;
-$$;
 
 -- =============================================================================
 -- UNIQUENESS CHECKS
@@ -1383,7 +1439,6 @@ $$;
 -- Duplicate patients: same facility + date_of_birth + sex within 14 days of each other.
 -- Catches registration of the same person twice (e.g. duplicate CCC numbers).
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1436,17 +1491,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'U01_duplicate_patient', 'uniqueness', 'high', 'patient', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'U01_duplicate_patient', 'uniqueness', 'high', 'patient', v_scanned, v_issues);
     RAISE NOTICE 'U01 | Duplicate patient: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- U02 | UNIQUENESS | MEDIUM
 -- Duplicate TB case numbers within the same county.
 -- Case numbers should be unique per county per NTLD-P protocol.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1459,7 +1512,7 @@ BEGIN
             tb.case_number,
             f.county_id,
             COUNT(*)          AS cnt,
-            MIN(tb.tb_case_id)::TEXT AS first_id,
+            MIN(tb.tb_case_id::TEXT) AS first_id,
             STRING_AGG(tb.tb_case_id::TEXT, ', ') AS all_ids
         FROM tb_case tb
         JOIN facility f ON tb.facility_id = f.facility_id
@@ -1495,17 +1548,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'U02_duplicate_tb_case_number', 'uniqueness', 'medium', 'tb_case', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'U02_duplicate_tb_case_number', 'uniqueness', 'medium', 'tb_case', v_scanned, v_issues);
     RAISE NOTICE 'U02 | Duplicate TB case number: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- U03 | UNIQUENESS | HIGH
 -- Duplicate aggregate reports: same facility + period + indicator.
 -- Double-submission inflates all aggregate indicators.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1520,7 +1571,7 @@ BEGIN
             period_month,
             indicator_code,
             COUNT(*) AS cnt,
-            MIN(report_id)::TEXT AS first_id
+            MIN(report_id::TEXT) AS first_id
         FROM aggregate_report
         GROUP BY facility_id, period_year, period_month, indicator_code
         HAVING COUNT(*) > 1
@@ -1556,10 +1607,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'U03_duplicate_aggregate_report', 'uniqueness', 'high', 'aggregate_report', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'U03_duplicate_aggregate_report', 'uniqueness', 'high', 'aggregate_report', v_scanned, v_issues);
     RAISE NOTICE 'U03 | Duplicate aggregate report: % issues', v_issues;
 END;
-$$;
 
 -- =============================================================================
 -- REFERENTIAL CHECKS
@@ -1570,7 +1620,6 @@ $$;
 -- Aggregate report references an inactive facility.
 -- Closed facilities should not generate new reporting periods.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1610,10 +1659,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'R01_report_for_inactive_facility', 'referential', 'medium', 'aggregate_report', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'R01_report_for_inactive_facility', 'referential', 'medium', 'aggregate_report', v_scanned, v_issues);
     RAISE NOTICE 'R01 | Report for inactive facility: % issues', v_issues;
 END;
-$$;
 
 -- =============================================================================
 -- PLAUSIBILITY CHECKS
@@ -1624,7 +1672,6 @@ $$;
 -- Adult patient (DOB before 2010) with weight < 15kg in ART visit.
 -- An adult under 15kg is clinically incompatible with life without critical care.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1669,10 +1716,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'P01_adult_weight_implausible', 'plausibility', 'high', 'art_visit', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'P01_adult_weight_implausible', 'plausibility', 'high', 'art_visit', v_scanned, v_issues);
     RAISE NOTICE 'P01 | Adult weight implausible: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- P02 | PLAUSIBILITY | MEDIUM
@@ -1680,7 +1726,6 @@ $$;
 -- CD4 > 2500 is extremely rare even in healthy HIV-negative adults and
 -- suggests a data entry error (e.g. transposing CD4% as CD4 count).
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1718,10 +1763,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'P02_cd4_implausibly_high', 'plausibility', 'medium', 'art_enrollment', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'P02_cd4_implausibly_high', 'plausibility', 'medium', 'art_enrollment', v_scanned, v_issues);
     RAISE NOTICE 'P02 | CD4 implausibly high: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- P03 | PLAUSIBILITY | HIGH
@@ -1729,7 +1773,6 @@ $$;
 -- A tripling of patients on treatment in a single month is almost certainly
 -- a data entry error or double-counting, not a real programmatic event.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1788,17 +1831,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'P03_tx_curr_jump', 'plausibility', 'high', 'aggregate_report', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'P03_tx_curr_jump', 'plausibility', 'high', 'aggregate_report', v_scanned, v_issues);
     RAISE NOTICE 'P03 | TX_CURR implausible jump: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- P04 | PLAUSIBILITY | MEDIUM
 -- Viral load > 10,000,000 copies/mL.
 -- Most assays cap at ~10M; values above this are likely transcription errors.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1836,17 +1877,15 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'P04_vl_implausibly_high', 'plausibility', 'medium', 'viral_load', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'P04_vl_implausibly_high', 'plausibility', 'medium', 'viral_load', v_scanned, v_issues);
     RAISE NOTICE 'P04 | VL implausibly high: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- P05 | PLAUSIBILITY | HIGH
 -- Stock record: days_out_of_stock > 31.
 -- A monthly stock record cannot have more than 31 stockout days.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1884,10 +1923,9 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'P05_days_stockout_exceeds_month', 'plausibility', 'high', 'stock_record', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'P05_days_stockout_exceeds_month', 'plausibility', 'high', 'stock_record', v_scanned, v_issues);
     RAISE NOTICE 'P05 | Days stockout > 31: % issues', v_issues;
 END;
-$$;
 
 -- ---------------------------------------------------------------------------
 -- P06 | PLAUSIBILITY | CRITICAL
@@ -1895,7 +1933,6 @@ $$;
 -- This is a clinical red flag. It likely represents a data entry error
 -- (e.g. 120 entered as 1200) but must be reviewed.
 -- ---------------------------------------------------------------------------
-DO $$
 DECLARE
     v_run_id    UUID := current_setting('dq.run_id')::UUID;
     v_issues    INT;
@@ -1933,15 +1970,13 @@ BEGIN
     )
     SELECT COUNT(*) INTO v_issues FROM bad;
 
-    PERFORM dq_log_check(v_run_id, 'P06_anc_systolic_bp_extreme', 'plausibility', 'critical', 'anc_visit', v_scanned, v_issues);
+    PERFORM public.dq_log_check(v_run_id, 'P06_anc_systolic_bp_extreme', 'plausibility', 'critical', 'anc_visit', v_scanned, v_issues);
     RAISE NOTICE 'P06 | ANC extreme systolic BP: % issues', v_issues;
 END;
-$$;
 
 -- =============================================================================
 -- STEP FINAL: Close the engine run, update totals
 -- =============================================================================
-DO $$
 DECLARE
     v_run_id        UUID := current_setting('dq.run_id')::UUID;
     v_checks_run    INT;
@@ -1965,4 +2000,9 @@ BEGIN
     RAISE NOTICE '====================================================';
     RAISE NOTICE 'Query data_quality_issue WHERE check_run_id = ''%'' to review findings.', v_run_id;
 END;
-$$;
+    RETURN v_run_id;
+END;
+$engine$;
+
+COMMENT ON FUNCTION public.run_dq_engine(VARCHAR) IS
+'Runs all 36 data-quality checks, records a run audit, and returns the run UUID. Safe for pg_cron and external orchestrators.';

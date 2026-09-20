@@ -1,22 +1,24 @@
 -- =============================================================================
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 02_seed_data.sql
--- Purpose: Realistic Kenya public health seed data.
---          Deliberately includes data quality issues so the engine has
---          something real to catch. Corrupted/problematic rows are annotated
---          with -- [DQ: <issue_type>] comments so you can trace what each
---          check is supposed to detect.
+-- Purpose: Deterministic synthetic raw data for DQ checks.
+--          Intentional DQ fixtures are labelled with
+--          -- [DQ: <issue_type>] comments.
 --
 -- Dataset scope:
---   - 6 counties (Nairobi, Kisumu, Mombasa, Nakuru, Kisii, Turkana)
---   - 40 facilities across those counties
---   - ~500 patient records
---   - ART enrollments, viral loads, ANC visits, TB cases, deliveries
---   - Aggregate DHIS2 reports with intentional inconsistencies
---   - Stock records with stockout and balance errors
+--   - 8 counties and 31 facilities
+--   - 61 patient rows, 63 ART enrolments, and 65 TB cases
+--   - 111 ANC visits and 29 deliveries
+--   - 306 stock records, 231 aggregate reports, and 121 CHW service records
 --
 -- Run after: 01_schema.sql
 -- =============================================================================
+
+-- Source extracts land in raw; county, facility, and commodity reference data
+-- resolve from public. The DQ engine reads this raw layer.
+SET search_path TO raw, public;
+SELECT setseed(0.20260920);
+BEGIN;
 
 -- ---------------------------------------------------------------------------
 -- COUNTIES
@@ -29,7 +31,8 @@ INSERT INTO county (county_id, county_name, region) VALUES
 (36, 'Kisii',      'Nyanza'),
 (23, 'Turkana',    'Rift Valley'),
 (10, 'Machakos',   'Eastern'),
-(21, 'Kakamega',   'Western');
+(21, 'Kakamega',   'Western')
+ON CONFLICT (county_id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- SUB-COUNTIES
@@ -49,10 +52,11 @@ INSERT INTO sub_county (sub_county_id, sub_county_name, county_id) VALUES
 (3601, 'Kisii Central',        36),
 (2301, 'Lodwar Town',          23),
 (1001, 'Machakos Town',        10),
-(2101, 'Kakamega Central',     21);
+(2101, 'Kakamega Central',     21)
+ON CONFLICT (sub_county_id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
--- FACILITIES (40 facilities, mix of types and counties)
+-- FACILITIES (31 facilities across eight counties)
 -- ---------------------------------------------------------------------------
 INSERT INTO facility (mfl_code, facility_name, facility_type, ownership,
                       sub_county_id, county_id, latitude, longitude,
@@ -66,7 +70,7 @@ INSERT INTO facility (mfl_code, facility_name, facility_type, ownership,
 ('21234', 'St Francis Community Hospital',    'hospital',                  'faith-based', 4701, 47, -1.2921, 36.8734, TRUE,  'SFC005', '1965-04-12'),
 ('22001', 'Umoja 1 Dispensary',               'dispensary',                'public', 4701, 47, -1.2777, 36.8901, TRUE,  'U1D006', '1990-09-01'),
 ('22450', 'Mathare North Health Centre',      'health centre',             'public', 4704, 47, -1.2632, 36.8615, FALSE, NULL,      '1985-01-01'),  -- inactive, no DHIS2 UID
-('23001', 'Aga Khan Hospital Nairobi',        'hospital',                  'private', 4703, 47, -1.2660, 36.8003, TRUE,  'AKH007', '1958-06-15'),
+('23002', 'Aga Khan Hospital Nairobi',        'hospital',                  'private', 4703, 47, -1.2660, 36.8003, TRUE,  'AKH007', '1958-06-15'),
 
 -- Kisumu
 ('14901', 'Jaramogi Oginga Odinga Teaching',  'national referral hospital', 'public', 4001, 40, -0.1022, 34.7617, TRUE,  'JOOT08', '1958-01-01'),
@@ -103,7 +107,8 @@ INSERT INTO facility (mfl_code, facility_name, facility_type, ownership,
 
 -- Kakamega
 ('21001', 'Kakamega County General Hospital', 'county hospital',           'public', 2101, 21, 0.2827, 34.7519, TRUE,   'KCGH29', '1948-01-01'),
-('21200', 'Mukumu Girls Mission Hospital',    'hospital',                  'faith-based', 2101, 21, 0.3040, 34.7690, TRUE, 'MGM030', '1960-01-01');
+('21200', 'Mukumu Girls Mission Hospital',    'hospital',                  'faith-based', 2101, 21, 0.3040, 34.7690, TRUE, 'MGM030', '1960-01-01')
+ON CONFLICT (mfl_code) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- COMMODITIES
@@ -172,7 +177,7 @@ SELECT
     f.facility_id,
     'NUPI' || LPAD((200 + ROW_NUMBER() OVER())::TEXT, 7, '0'),
     ('2010-01-01'::DATE + (RANDOM() * 3650)::INT),
-    CASE WHEN RANDOM() > 0.5 THEN 'male' ELSE 'female' END,
+    (CASE WHEN RANDOM() > 0.5 THEN 'male' ELSE 'female' END)::sex_type,
     (ARRAY[47, 40, 1])[CEIL(RANDOM() * 3)::INT],
     ('2018-01-01'::DATE + (RANDOM() * 1825)::INT),
     'KenyaEMR'
@@ -189,19 +194,25 @@ INSERT INTO patient (facility_id, nupi_number, date_of_birth, sex, date_enrolled
 
 -- [DQ: VALIDITY] Patient with impossible date_of_birth (future date)
 INSERT INTO patient (facility_id, nupi_number, date_of_birth, sex, date_enrolled, data_source) VALUES
-((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 'NUPIUNK004', '2035-06-15', 'female', '2021-04-01', 'manual_entry');
+((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 'NUPIUNK004', '2035-06-15', 'female', '2035-06-20', 'manual_entry');
 
 -- [DQ: CONSISTENCY] Patient enrolled before born (dob=2000, enrolled=1999)
 -- NOTE: The CHECK constraint on patient prevents dod < dob, but enrollment < dob is not constrained.
 INSERT INTO patient (facility_id, nupi_number, date_of_birth, sex, date_enrolled, data_source) VALUES
 ((SELECT facility_id FROM facility WHERE mfl_code = '15044'), 'NUPIUNK005', '2000-05-10', 'male', '1999-12-01', 'paper_CIF');
 
--- [DQ: UNIQUENESS] Duplicate NUPI (same NUPI_0000001 repeated — unique constraint will catch this in prod,
---  but we simulate the detection logic via a DQ check rather than relying solely on the constraint)
--- We'll instead create near-duplicate patients (same DOB + facility + sex) without exact NUPI match:
+-- [DQ: UNIQUENESS] Near-duplicate patient records.
+-- These rows share facility, date of birth, and sex but use distinct NUPIs. U01 detects them.
 INSERT INTO patient (facility_id, nupi_number, date_of_birth, sex, date_enrolled, data_source) VALUES
 ((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 'NUPIDUP001A', '1987-03-22', 'female', '2020-05-01', 'KenyaEMR'),
 ((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 'NUPIDUP001B', '1987-03-22', 'female', '2020-05-15', 'KenyaEMR');
+
+-- [DQ: CONSISTENCY] ART recorded after the patient's documented death
+-- Patient data remains structurally valid; the cross-table timeline is not.
+INSERT INTO patient (facility_id, nupi_number, date_of_birth, sex, date_enrolled,
+                     date_of_death, data_source) VALUES
+((SELECT facility_id FROM facility WHERE mfl_code = '21234'), 'NUPIDEATH001',
+ '1980-09-14', 'male', '2020-01-15', '2022-05-20', 'KenyaEMR');
 
 -- ---------------------------------------------------------------------------
 -- CHW RECORDS
@@ -313,6 +324,36 @@ SELECT
 FROM patient p
 WHERE p.nupi_number = 'NUPIDUP001B';
 
+-- [DQ: COMPLETENESS] ART enrollment without weight_at_start
+INSERT INTO art_enrollment (patient_id, facility_id, art_start_date, entry_point,
+                            who_stage_at_start, cd4_at_start, initial_regimen)
+SELECT
+    p.patient_id,
+    p.facility_id,
+    p.date_enrolled + INTERVAL '10 days',
+    'OPD',
+    2,
+    420,
+    'TLD'
+FROM patient p
+WHERE p.nupi_number = 'NUPIDEATH001';
+
+-- [DQ: CONSISTENCY] ART start date after patient date of death
+INSERT INTO art_enrollment (patient_id, facility_id, art_start_date, entry_point,
+                            who_stage_at_start, cd4_at_start, weight_at_start,
+                            initial_regimen)
+SELECT
+    p.patient_id,
+    p.facility_id,
+    '2022-06-01',
+    'OPD',
+    3,
+    380,
+    71.0,
+    'TLD'
+FROM patient p
+WHERE p.nupi_number = 'NUPIDEATH001';
+
 -- ---------------------------------------------------------------------------
 -- VIRAL LOAD RESULTS
 -- ---------------------------------------------------------------------------
@@ -324,16 +365,17 @@ SELECT
     ae.patient_id,
     ae.facility_id,
     ae.enrollment_id,
-    ae.art_start_date + (RANDOM() * 365)::INT,
-    ae.art_start_date + (RANDOM() * 365)::INT + 14,
-    CASE WHEN RANDOM() > 0.25
-         THEN ROUND((RANDOM() * 200)::NUMERIC, 2)
-         ELSE NULL END,
-    CASE WHEN RANDOM() > 0.75 THEN TRUE ELSE FALSE END,
-    CASE WHEN RANDOM() > 0.25 THEN 'suppressed' ELSE 'unsuppressed' END,
+    s.sample_date,
+    s.sample_date + 14,
+    ROUND((RANDOM() * 200)::NUMERIC, 2),
+    FALSE,
+    'suppressed',
     (ARRAY['KEMRI Nairobi Lab','Coast Provincial Lab','Kisumu NPHL','Nakuru Lab Hub'])[CEIL(RANDOM()*4)::INT],
     'lab_LIMS'
 FROM art_enrollment ae
+CROSS JOIN LATERAL (
+    SELECT ae.art_start_date + (RANDOM() * 365)::INT AS sample_date
+) s
 LIMIT 60;
 
 -- [DQ: CONSISTENCY] VL result date before sample date
@@ -349,6 +391,25 @@ SELECT
     'KEMRI Nairobi Lab',
     'lab_LIMS'
 FROM art_enrollment ae
+LIMIT 1;
+
+-- [DQ: PLAUSIBILITY] Viral load above 10,000,000 copies/mL
+INSERT INTO viral_load (patient_id, facility_id, enrollment_id, sample_date, result_date,
+                        vl_result, is_ldl, vl_category, lab_name, data_source)
+SELECT
+    ae.patient_id,
+    ae.facility_id,
+    ae.enrollment_id,
+    '2023-08-01',
+    '2023-08-07',
+    15000000,
+    FALSE,
+    'high_vl',
+    'KEMRI Nairobi Lab',
+    'lab_LIMS'
+FROM art_enrollment ae
+JOIN patient p ON p.patient_id = ae.patient_id
+WHERE p.nupi_number = 'NUPIDUP001A'
 LIMIT 1;
 
 -- [DQ: COMPLETENESS] VL records missing result entirely (not LDL, just NULL result with no LDL flag)
@@ -391,8 +452,8 @@ INSERT INTO art_visit (patient_id, facility_id, visit_date, next_appointment,
 SELECT
     ae.patient_id,
     ae.facility_id,
-    ae.art_start_date + (g * 90),                      -- quarterly visits
-    ae.art_start_date + (g * 90) + 90,                 -- next appt 90 days out
+    CURRENT_DATE - ((3 - g) * 90),                     -- quarterly visits ending today
+    CURRENT_DATE - ((3 - g) * 90) + 90,                -- next appointment remains current
     ROUND((40 + RANDOM()*60)::NUMERIC, 1),
     ae.initial_regimen,
     (ARRAY[30, 60, 90])[CEIL(RANDOM()*3)::INT],
@@ -400,8 +461,30 @@ SELECT
     'KenyaEMR'
 FROM art_enrollment ae
 CROSS JOIN generate_series(0, 3) g
-WHERE ae.art_start_date + (g * 90) <= CURRENT_DATE
 LIMIT 200;
+
+-- [DQ: TIMELINESS] ART patient overdue with no later visit (possible LTFU)
+-- This enrollment is created after the clean visit generator so its stale
+-- appointment is the patient's latest recorded visit.
+INSERT INTO patient (facility_id, nupi_number, date_of_birth, sex, date_enrolled, data_source) VALUES
+((SELECT facility_id FROM facility WHERE mfl_code = '22001'), 'NUPILTFU001',
+ '1985-04-18', 'female', '2020-01-15', 'KenyaEMR');
+
+INSERT INTO art_enrollment (patient_id, facility_id, art_start_date, entry_point,
+                            who_stage_at_start, cd4_at_start, weight_at_start,
+                            initial_regimen)
+SELECT p.patient_id, p.facility_id, p.date_enrolled + 7, 'OPD', 2, 510, 64.0, 'TLD'
+FROM patient p
+WHERE p.nupi_number = 'NUPILTFU001';
+
+INSERT INTO art_visit (patient_id, facility_id, visit_date, next_appointment,
+                       weight_kg, current_regimen, days_dispensed, adherence_score,
+                       data_source)
+SELECT ae.patient_id, ae.facility_id, CURRENT_DATE - 220, CURRENT_DATE - 150,
+       64.0, 'TLD', 30, 86, 'KenyaEMR'
+FROM art_enrollment ae
+JOIN patient p ON p.patient_id = ae.patient_id
+WHERE p.nupi_number = 'NUPILTFU001';
 
 -- [DQ: PLAUSIBILITY] Weight of 4kg for an adult (impossible without paediatric context)
 INSERT INTO art_visit (patient_id, facility_id, visit_date, weight_kg,
@@ -445,18 +528,27 @@ SELECT
     p.patient_id,
     p.facility_id,
     'TB-' || c.county_id || '-' || LPAD((ROW_NUMBER() OVER())::TEXT, 4,'0'),
-    ('2022-01-01'::DATE + (RANDOM()*730)::INT),
-    ('2021-12-25'::DATE + (RANDOM()*730)::INT),
+    n.notification_date,
+    d.diagnosis_date,
     (ARRAY['new','relapse','treatment_after_failure'])[CEIL(RANDOM()*3)::INT]::tb_case_type,
     (ARRAY['pulmonary','extra_pulmonary'])[CEIL(RANDOM()*2)::INT],
     (ARRAY['positive','negative','not_done'])[CEIL(RANDOM()*3)::INT],
     (ARRAY['positive','negative','unknown'])[CEIL(RANDOM()*3)::INT]::hiv_status,
-    ('2022-01-15'::DATE + (RANDOM()*730)::INT),
+    t.treatment_start,
     (ARRAY['cured','treatment_completed','on_treatment','lost_to_follow_up'])[CEIL(RANDOM()*4)::INT]::tb_treatment_outcome,
     'DHIS2'
 FROM patient p
 JOIN facility f ON p.facility_id = f.facility_id
 JOIN county c ON f.county_id = c.county_id
+CROSS JOIN LATERAL (
+    SELECT ('2022-01-01'::DATE + (RANDOM() * 600)::INT) AS diagnosis_date
+) d
+CROSS JOIN LATERAL (
+    SELECT d.diagnosis_date + (1 + (RANDOM() * 14)::INT) AS notification_date
+) n
+CROSS JOIN LATERAL (
+    SELECT n.notification_date + (1 + (RANDOM() * 14)::INT) AS treatment_start
+) t
 WHERE p.date_of_birth IS NOT NULL
 LIMIT 80;
 
@@ -477,6 +569,12 @@ INSERT INTO tb_case (facility_id, case_number, notification_date, case_type,
                      site, treatment_start, treatment_outcome, data_source) VALUES
 ((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 'TB-47-9995', '2023-07-01', 'new', 'pulmonary', NULL, 'cured', 'DHIS2');
 
+-- [DQ: UNIQUENESS] Same TB case number reported by two facilities in Nairobi County
+INSERT INTO tb_case (facility_id, case_number, notification_date, diagnosis_date,
+                     case_type, site, treatment_start, treatment_outcome, data_source) VALUES
+((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 'TB-47-DUP-0001', '2023-09-05', '2023-09-01', 'new', 'pulmonary', '2023-09-06', 'on_treatment', 'DHIS2'),
+((SELECT facility_id FROM facility WHERE mfl_code = '15044'), 'TB-47-DUP-0001', '2023-09-06', '2023-09-02', 'new', 'pulmonary', '2023-09-07', 'on_treatment', 'DHIS2');
+
 -- ---------------------------------------------------------------------------
 -- ANC VISITS
 -- ---------------------------------------------------------------------------
@@ -494,7 +592,7 @@ SELECT
     (FLOOR(100 + RANDOM()*60))::SMALLINT,
     (FLOOR(60 + RANDOM()*40))::SMALLINT,
     TRUE,
-    (ARRAY['negative','positive','unknown'])[CEIL(RANDOM()*3)::INT]::hiv_status,
+    'negative'::hiv_status,
     RANDOM() > 0.3,
     'KenyaEMR'
 FROM patient p
@@ -503,7 +601,7 @@ WHERE p.sex = 'female'
   AND p.date_of_birth BETWEEN '1985-01-01' AND '2003-12-31'
 LIMIT 160;
 
--- [DQ: VALIDITY] ANC on a male patient (sex mismatch)
+-- [DQ: CONSISTENCY] ANC on a male patient (sex mismatch)
 INSERT INTO anc_visit (patient_id, facility_id, visit_date, anc_visit_number,
                        gestational_age_wks, data_source)
 SELECT
@@ -566,7 +664,7 @@ SELECT
     (ARRAY['live_birth','stillbirth'])[CEIL(RANDOM()*2)::INT],
     ROUND((2000 + RANDOM()*2500)::NUMERIC, 1),
     (FLOOR(36 + RANDOM()*4))::SMALLINT,
-    (ARRAY['negative','positive','unknown'])[CEIL(RANDOM()*3)::INT]::hiv_status,
+    'negative'::hiv_status,
     (ARRAY['negative','positive'])[CEIL(RANDOM()*2)::INT]::hiv_status,
     (FLOOR(5 + RANDOM()*5))::SMALLINT,
     (FLOOR(7 + RANDOM()*3))::SMALLINT,
@@ -647,7 +745,7 @@ SELECT
     2023,
     m.month_num,
     'TX_CURR',
-    FLOOR(150 + RANDOM()*600),
+    150 + (f.facility_id * 3) + (m.month_num * 2),
     (MAKE_DATE(2023, m.month_num, 1) + INTERVAL '15 days')::TIMESTAMPTZ,
     'DHIS2'
 FROM facility f
@@ -679,6 +777,17 @@ INSERT INTO aggregate_report (facility_id, period_type, period_year, period_mont
 ((SELECT facility_id FROM facility WHERE mfl_code = '14901'), 'monthly', 2023, 8, 'HTS_TST',     200, '2023-09-14 08:00:00+03', 'DHIS2'),
 ((SELECT facility_id FROM facility WHERE mfl_code = '14901'), 'monthly', 2023, 8, 'HTS_TST_POS', 350, '2023-09-14 08:00:00+03', 'DHIS2');
 
+-- [DQ: REFERENTIAL] Aggregate report submitted for an inactive facility
+INSERT INTO aggregate_report (facility_id, period_type, period_year, period_month,
+                              indicator_code, value, submission_date, data_source) VALUES
+((SELECT facility_id FROM facility WHERE mfl_code = '22450'), 'monthly', 2023, 10, 'HTS_TST', 125, '2023-11-12 08:00:00+03', 'DHIS2');
+
+-- [DQ: UNIQUENESS] Duplicate facility-period-indicator aggregate submissions
+INSERT INTO aggregate_report (facility_id, period_type, period_year, period_month,
+                              indicator_code, value, submission_date, data_source) VALUES
+((SELECT facility_id FROM facility WHERE mfl_code = '18001'), 'monthly', 2023, 11, 'TX_NEW', 44, '2023-12-10 08:00:00+03', 'DHIS2'),
+((SELECT facility_id FROM facility WHERE mfl_code = '18001'), 'monthly', 2023, 11, 'TX_NEW', 61, '2023-12-11 08:00:00+03', 'DHIS2');
+
 -- ---------------------------------------------------------------------------
 -- STOCK RECORDS
 -- ---------------------------------------------------------------------------
@@ -690,16 +799,23 @@ SELECT
     f.facility_id,
     c.commodity_id,
     ('2023-01-01'::DATE + (m * 30)),
-    ROUND((500 + RANDOM()*3000)::NUMERIC, 2),
-    ROUND((RANDOM()*1000)::NUMERIC, 2),
-    ROUND((100 + RANDOM()*800)::NUMERIC, 2),
-    ROUND((RANDOM()*50)::NUMERIC, 2),
-    ROUND((500 + RANDOM()*2500)::NUMERIC, 2),  -- will have balance errors (DQ check will catch)
+    q.opening_balance,
+    q.received_qty,
+    q.dispensed_qty,
+    q.losses_adjustments,
+    q.opening_balance + q.received_qty - q.dispensed_qty - q.losses_adjustments,
     0,
     'DHIS2'
 FROM facility f
 CROSS JOIN commodity c
 CROSS JOIN generate_series(0,8) m
+CROSS JOIN LATERAL (
+    SELECT
+        ROUND((500 + RANDOM() * 3000)::NUMERIC, 2) AS opening_balance,
+        ROUND((RANDOM() * 1000)::NUMERIC, 2) AS received_qty,
+        ROUND((100 + RANDOM() * 800)::NUMERIC, 2) AS dispensed_qty,
+        ROUND((RANDOM() * 50)::NUMERIC, 2) AS losses_adjustments
+) q
 WHERE f.is_active = TRUE AND c.is_tracer = TRUE
 LIMIT 300;
 
@@ -727,16 +843,21 @@ INSERT INTO stock_record (facility_id, commodity_id, record_date, opening_balanc
 -- ---------------------------------------------------------------------------
 -- CHW SERVICE RECORDS (sample)
 -- ---------------------------------------------------------------------------
-INSERT INTO chw_service_record (chw_id, patient_id, service_date, service_type, outcome, data_source)
+INSERT INTO chw_service_record (chw_id, patient_id, service_date, service_type, outcome,
+                                data_source, created_at)
 SELECT
     chw.chw_id,
     p.patient_id,
-    ('2023-01-01'::DATE + (RANDOM()*300)::INT),
+    s.service_date,
     (ARRAY['household_visit','defaulter_tracing','referral','health_education'])[CEIL(RANDOM()*4)::INT],
     (ARRAY['client_found','client_absent','referred_facility','completed'])[CEIL(RANDOM()*4)::INT],
-    'mobile_CHW'
+    'mobile_CHW',
+    s.service_date + ((RANDOM() * 7)::INT * INTERVAL '1 day')
 FROM chw
 CROSS JOIN patient p
+CROSS JOIN LATERAL (
+    SELECT CURRENT_DATE - (RANDOM() * 300)::INT AS service_date
+) s
 WHERE chw.is_active = TRUE
   AND p.facility_id IN (SELECT facility_id FROM facility WHERE county_id IN (47, 40))
 LIMIT 120;

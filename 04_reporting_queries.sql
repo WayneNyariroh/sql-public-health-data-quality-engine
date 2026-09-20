@@ -18,7 +18,7 @@
 --     B03 - Mean time to resolve by severity
 --     B04 - Check engine run history (performance over time)
 --
---   SECTION C: Domain-specific deep dives
+--   SECTION C: Domain-specific queries
 --     C01 - ART program DQ: missing weight + overdue patients by facility
 --     C02 - TB cascade DQ: notification delay distribution
 --     C03 - Viral load suppression accuracy (flagged mislabels)
@@ -27,7 +27,7 @@
 --     C06 - Aggregate reporting: late submission frequency by county
 --
 --   SECTION D: Operational / triage
---     D01 - All open critical issues (latest run) — action list
+--     D01 - All open critical issues (latest run): action list
 --     D02 - Issues by data_source (identify worst data entry channels)
 --     D03 - Facilities with zero open issues (DQ clean list)
 --     D04 - Stale open issues (open > 30 days without update)
@@ -541,8 +541,8 @@ ORDER BY late_submission_rate_pct DESC;
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- D01 | All Open Critical Issues (latest run) — Action List
--- This is the front-line triage queue for DQ focal persons.
+-- D01 | All Open Critical Issues (latest run): Action List
+-- Lists open critical findings from the latest run.
 -- ---------------------------------------------------------------------------
 SELECT
     dqi.issue_id,
@@ -596,7 +596,7 @@ ORDER BY total_issues DESC;
 
 -- ---------------------------------------------------------------------------
 -- D03 | Facilities with Zero Open Issues (DQ Clean List)
--- Positive reinforcement: identify high-performing facilities.
+-- Lists facilities with no open findings.
 -- ---------------------------------------------------------------------------
 SELECT
     f.county_name,
