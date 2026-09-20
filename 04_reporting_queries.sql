@@ -260,33 +260,40 @@ ORDER BY 1 DESC, 4 DESC;
 -- ---------------------------------------------------------------------------
 SELECT
     severity,
-    COUNT(*) FILTER (WHERE status = 'resolved')                AS resolved_count,
+    COUNT(*) FILTER (WHERE status = 'resolved') AS resolved_count,
+
     ROUND(
-        AVG(
-            EXTRACT(DAY FROM (resolved_at - detected_at))
-        ) FILTER (WHERE status = 'resolved'), 1
-    )                                                          AS avg_days_to_resolve,
+        (
+            AVG(EXTRACT(DAY FROM (resolved_at - detected_at)))
+            FILTER (WHERE status = 'resolved')
+        )::NUMERIC,
+        1
+    ) AS avg_days_to_resolve,
+
     ROUND(
-        PERCENTILE_CONT(0.5) WITHIN GROUP (
-            ORDER BY EXTRACT(DAY FROM (resolved_at - detected_at))
-        ) FILTER (WHERE status = 'resolved'), 1
-    )                                                          AS median_days_to_resolve,
-    MIN(
-        EXTRACT(DAY FROM (resolved_at - detected_at))
-    ) FILTER (WHERE status = 'resolved')                       AS min_days,
-    MAX(
-        EXTRACT(DAY FROM (resolved_at - detected_at))
-    ) FILTER (WHERE status = 'resolved')                       AS max_days
+        (
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(DAY FROM (resolved_at - detected_at))
+            ) FILTER (WHERE status = 'resolved')
+        )::NUMERIC,
+        1
+    ) AS median_days_to_resolve,
+
+    MIN(EXTRACT(DAY FROM (resolved_at - detected_at)))
+        FILTER (WHERE status = 'resolved') AS min_days,
+
+    MAX(EXTRACT(DAY FROM (resolved_at - detected_at)))
+        FILTER (WHERE status = 'resolved') AS max_days
+
 FROM data_quality_issue
 GROUP BY severity
-ORDER BY
-    CASE severity
-        WHEN 'critical' THEN 1
-        WHEN 'high'     THEN 2
-        WHEN 'medium'   THEN 3
-        WHEN 'low'      THEN 4
-        ELSE 5
-    END;
+ORDER BY CASE severity
+    WHEN 'critical' THEN 1
+    WHEN 'high' THEN 2
+    WHEN 'medium' THEN 3
+    WHEN 'low' THEN 4
+    ELSE 5
+END;
 
 
 -- ---------------------------------------------------------------------------
@@ -337,15 +344,17 @@ SELECT
     )                                                          AS pct_missing_weight,
 
     -- Overdue patients (no visit in last 90 days from their appointment)
-    COUNT(DISTINCT ov.patient_id)                              AS overdue_patients
+    COUNT(DISTINCT ov.record_id)                               AS overdue_patients
 
 FROM vw_facility_full f
 LEFT JOIN art_enrollment ae ON f.facility_id = ae.facility_id
 LEFT JOIN (
-    SELECT DISTINCT patient_id, facility_id
+    SELECT DISTINCT record_id, facility_id
     FROM data_quality_issue
     WHERE check_name = 'T04_art_patient_overdue'
+      AND source_table = 'art_visit'
       AND status = 'open'
+      AND record_id IS NOT NULL
 ) ov ON f.facility_id = ov.facility_id
 GROUP BY f.county_name, f.facility_name, f.mfl_code
 HAVING COUNT(ae.enrollment_id) > 0

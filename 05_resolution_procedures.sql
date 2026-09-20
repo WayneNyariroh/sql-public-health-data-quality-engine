@@ -249,7 +249,7 @@ BEGIN
         WHERE check_name = v_check_name;
 
         IF v_fp_rate > 20 THEN
-            RAISE NOTICE 'ALERT: Check ''%'' now has a false positive rate of %%. Consider reviewing check logic.',
+            RAISE NOTICE 'ALERT: Check % now has a false positive rate of % percent. Consider reviewing check logic.',
                 v_check_name, v_fp_rate;
         END IF;
     END;
@@ -479,6 +479,7 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_dqi_updated_at ON data_quality_issue;
 CREATE TRIGGER trg_dqi_updated_at
     BEFORE UPDATE ON data_quality_issue
     FOR EACH ROW EXECUTE FUNCTION dqi_set_updated_at();
@@ -494,6 +495,7 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_patient_updated_at ON patient;
 CREATE TRIGGER trg_patient_updated_at
     BEFORE UPDATE ON patient
     FOR EACH ROW EXECUTE FUNCTION patient_set_updated_at();
