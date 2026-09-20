@@ -1,8 +1,7 @@
 -- =============================================================================
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 03_dq_engine.sql
--- Purpose: The automated check engine. Run this as a scheduled job
---          (pg_cron, Airflow, dbt test, or manual execution).
+-- Purpose: The automated check engine. Run as a scheduled job (pg_cron, Airflow, etc or manual execution).
 --          Each check runs in its own block and:
 --            1. Scans its target table/column
 --            2. Inserts issues into data_quality_issue
@@ -11,8 +10,7 @@
 -- Architecture:
 --   - A new dq_engine_run row is created at the top.
 --   - v_run_id captures that UUID for the entire session.
---   - Each check is an independently scoped PL/pgSQL block within the
---     callable engine function, so a scheduled run is atomic and auditable.
+--   - Each check is an independently scoped PL/pgSQL block within the callable engine function, so a scheduled run is atomic and auditable.
 --   - public.dq_log_check() writes the audit log for each check.
 --
 -- Check inventory (36 checks across 7 categories):
@@ -67,8 +65,7 @@
 --     P05 - Stock days_out_of_stock > 31
 --     P06 - ANC systolic BP > 200 mmHg (hypertensive crisis, no alert recorded)
 --
--- Run after: 01_schema.sql, 02_seed_data.sql
--- =============================================================================
+-- Run after: 01_schema.sql & 02_seed_data.sql
 
 -- ---------------------------------------------------------------------------
 -- HELPER: ensure idempotent run by committing session variables

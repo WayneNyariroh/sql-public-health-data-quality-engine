@@ -1,9 +1,6 @@
--- =============================================================================
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 06_scheduled_job.sql
--- Purpose: pg_cron scheduling and maintenance functions.
---          The daily job calls public.run_dq_engine(), which is defined in
---          03_dq_engine.sql.
+-- Purpose: pg_cron scheduling and maintenance functions. The daily job calls public.run_dq_engine(), which is defined in 03_dq_engine.sql.
 --
 -- Prerequisites:
 --   pg_cron extension installed and configured in postgresql.conf:
@@ -11,12 +8,11 @@
 --     cron.database_name = '<your_db_name>'
 --
 -- Schedule:
---   - Full engine run:      Daily at 02:00 EAT (23:00 UTC)
---   - Stale issue alert:    Weekly Monday 07:00 EAT
---   - Suppression cleanup:  Daily at 03:00 EAT
+--   - Full engine run: Daily at 02:00 EAT (23:00 UTC)
+--   - Stale issue alert: Weekly Monday 07:00 EAT
+--   - Suppression cleanup: Daily at 03:00 EAT
 --
 -- Run after: 05_resolution_procedures.sql
--- =============================================================================
 
 SET search_path TO public;
 
@@ -117,8 +113,8 @@ CREATE OR REPLACE FUNCTION stale_issue_alert(
         f.county_name::VARCHAR,
         f.facility_name::VARCHAR,
         f.mfl_code::VARCHAR,
-        COUNT(dqi.issue_id)                                   AS stale_count,
-        MAX(CURRENT_DATE - dqi.detected_at::DATE)::INT        AS oldest_issue_days
+        COUNT(dqi.issue_id) AS stale_count,
+        MAX(CURRENT_DATE - dqi.detected_at::DATE)::INT AS oldest_issue_days
     FROM data_quality_issue dqi
     JOIN vw_facility_full f ON dqi.facility_id = f.facility_id
     WHERE dqi.status = 'open'
@@ -227,10 +223,9 @@ SELECT cron.schedule(
 -- To unschedule a job:
 -- SELECT cron.unschedule('dq_engine_daily_run');
 
--- ---------------------------------------------------------------------------
--- ALTERNATIVE: Shell / Airflow invocation (no pg_cron)
+-- ------------------------------------------------------------------------
 -- If pg_cron is not available, schedule via OS cron or Airflow using psql:
--- ---------------------------------------------------------------------------
+-- ------------------------------------------------------------------------
 
 /*
 -- /etc/cron.d/dq_engine (as postgres user):

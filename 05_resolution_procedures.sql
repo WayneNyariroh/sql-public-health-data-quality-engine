@@ -1,4 +1,3 @@
--- =============================================================================
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 05_resolution_procedures.sql
 -- Purpose: Stored procedures and functions for managing the DQ issue lifecycle.
@@ -19,7 +18,6 @@
 --   check_is_suppressed()   - Tests whether a matching suppression request exists
 --
 -- Run after: 01_schema.sql
--- =============================================================================
 
 SET search_path TO public;
 
@@ -502,7 +500,7 @@ CREATE TRIGGER trg_patient_updated_at
 
 
 -- ---------------------------------------------------------------------------
--- EXAMPLE USAGE (commented out, uncomment to test)
+-- USAGE CASES uncomment to test
 -- ---------------------------------------------------------------------------
 
 /*

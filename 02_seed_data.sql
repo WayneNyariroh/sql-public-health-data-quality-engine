@@ -1,4 +1,3 @@
--- =============================================================================
 -- PUBLIC HEALTH DATA QUALITY ENGINE
 -- File: 02_seed_data.sql
 -- Purpose: Deterministic synthetic raw data for DQ checks.
@@ -12,7 +11,6 @@
 --   - 306 stock records, 231 aggregate reports, and 121 CHW service records
 --
 -- Run after: 01_schema.sql
--- =============================================================================
 
 -- Source extracts land in raw; county, facility, and commodity reference data
 -- resolve from public. The DQ engine reads this raw layer.
@@ -69,7 +67,7 @@ INSERT INTO facility (mfl_code, facility_name, facility_type, ownership,
 ('20361', 'Kibra Sub-County Hospital',        'sub-county hospital',       'public', 4702, 47, -1.3189, 36.7843, TRUE,  'KBSC04', '1988-01-01'),
 ('21234', 'St Francis Community Hospital',    'hospital',                  'faith-based', 4701, 47, -1.2921, 36.8734, TRUE,  'SFC005', '1965-04-12'),
 ('22001', 'Umoja 1 Dispensary',               'dispensary',                'public', 4701, 47, -1.2777, 36.8901, TRUE,  'U1D006', '1990-09-01'),
-('22450', 'Mathare North Health Centre',      'health centre',             'public', 4704, 47, -1.2632, 36.8615, FALSE, NULL,      '1985-01-01'),  -- inactive, no DHIS2 UID
+('22450', 'Mathare North Health Centre',      'health centre',             'public', 4704, 47, -1.2632, 36.8615, FALSE, NULL,      '1985-01-01'), -- inactive with no DHIS2 UID
 ('23002', 'Aga Khan Hospital Nairobi',        'hospital',                  'private', 4703, 47, -1.2660, 36.8003, TRUE,  'AKH007', '1958-06-15'),
 
 -- Kisumu
@@ -132,7 +130,7 @@ INSERT INTO commodity (commodity_name, category, unit, is_tracer) VALUES
 
 -- ---------------------------------------------------------------------------
 -- PATIENTS (~150 records, mix of clean and dirty data)
--- Deliberate DQ issues are annotated inline.
+-- Deliberate DQ issues left and annotated inline.
 -- ---------------------------------------------------------------------------
 
 -- Clean female patients (ART/ANC candidates)
@@ -142,7 +140,7 @@ SELECT
     uuid_generate_v4(),
     f.facility_id,
     'NUPI' || LPAD((ROW_NUMBER() OVER())::TEXT, 7, '0'),
-    ('1980-01-01'::DATE + (RANDOM() * 7300)::INT),  -- 1980–2000
+    ('1980-01-01'::DATE + (RANDOM() * 7300)::INT), -- 1980–2000
     'female',
     (ARRAY[47, 40, 1, 32, 36, 23])[CEIL(RANDOM() * 6)::INT],
     ('2015-01-01'::DATE + (RANDOM() * 3000)::INT),
@@ -245,7 +243,7 @@ SELECT
 FROM patient p
 WHERE p.sex = 'female'
   AND p.date_of_birth IS NOT NULL
-  AND p.date_of_birth < '2010-01-01'   -- adults
+  AND p.date_of_birth < '2010-01-01' -- adults
 LIMIT 50;
 
 -- Clean enrollments for male patients
@@ -290,7 +288,7 @@ INSERT INTO art_enrollment (patient_id, facility_id, art_start_date, entry_point
 SELECT
     p.patient_id,
     p.facility_id,
-    p.date_enrolled - INTERVAL '90 days',  -- art started BEFORE enrollment
+    p.date_enrolled - INTERVAL '90 days', -- art started BEFORE enrollment
     'VCT',
     'TLD'
 FROM patient p
@@ -305,7 +303,7 @@ SELECT
     p.date_enrolled + INTERVAL '1 day',
     'OPD',
     2,
-    -50,   -- negative CD4 count: clearly invalid
+    -50, -- negative CD4 count: clearly invalid
     'TLE'
 FROM patient p
 WHERE p.nupi_number = 'NUPIDUP001A';
@@ -319,7 +317,7 @@ SELECT
     p.date_enrolled + INTERVAL '5 days',
     'TB/HIV',
     3,
-    3450,  -- implausibly high
+    3450, -- implausibly high
     'TLD'
 FROM patient p
 WHERE p.nupi_number = 'NUPIDUP001B';
@@ -385,7 +383,7 @@ SELECT
     ae.patient_id,
     ae.facility_id,
     '2023-06-15',
-    '2023-06-01',   -- result date BEFORE sample date
+    '2023-06-01', -- result date BEFORE sample date
     450,
     'unsuppressed',
     'KEMRI Nairobi Lab',
@@ -420,8 +418,8 @@ SELECT
     ae.facility_id,
     ae.art_start_date + 180,
     ae.art_start_date + 194,
-    NULL,   -- result missing
-    FALSE,  -- not flagged as LDL either
+    NULL, -- result missing
+    FALSE, -- not flagged as LDL either
     NULL,
     'Unknown Lab',
     'lab_LIMS'
@@ -436,9 +434,9 @@ SELECT
     ae.facility_id,
     '2023-09-01',
     '2023-09-15',
-    8500,          -- high viral load
+    8500, -- high viral load
     FALSE,
-    'suppressed',  -- but labeled suppressed: contradictory
+    'suppressed', -- but labeled suppressed: contradictory
     'KEMRI Nairobi Lab',
     'lab_LIMS'
 FROM art_enrollment ae
@@ -452,8 +450,8 @@ INSERT INTO art_visit (patient_id, facility_id, visit_date, next_appointment,
 SELECT
     ae.patient_id,
     ae.facility_id,
-    CURRENT_DATE - ((3 - g) * 90),                     -- quarterly visits ending today
-    CURRENT_DATE - ((3 - g) * 90) + 90,                -- next appointment remains current
+    CURRENT_DATE - ((3 - g) * 90), -- quarterly visits ending today
+    CURRENT_DATE - ((3 - g) * 90) + 90, -- next appointment remains current
     ROUND((40 + RANDOM()*60)::NUMERIC, 1),
     ae.initial_regimen,
     (ARRAY[30, 60, 90])[CEIL(RANDOM()*3)::INT],
@@ -493,7 +491,7 @@ SELECT
     ae.patient_id,
     ae.facility_id,
     ae.art_start_date + 30,
-    4.0,    -- implausibly low for an adult
+    4.0, -- implausibly low for an adult
     ae.initial_regimen,
     90,
     'KenyaEMR'
@@ -512,7 +510,7 @@ SELECT
     65.0,
     'TLD',
     90,
-    -10,   -- invalid: adherence must be 0-100
+    -10, -- invalid: adherence must be 0-100
     'manual_entry'
 FROM art_enrollment ae
 OFFSET 2 LIMIT 1;
@@ -623,7 +621,7 @@ SELECT
     p.facility_id,
     '2023-08-20',
     3,
-    50,   -- impossible: max is 44
+    50, -- impossible data point since max is 44
     62.0,
     'manual_entry'
 FROM patient p
@@ -641,7 +639,7 @@ SELECT
     2,
     24,
     58.0,
-    280,    -- crisis-level BP: clinical alert warranted
+    280, -- crisis-level BP: clinical alert warranted
     175,
     'KenyaEMR'
 FROM patient p
@@ -683,7 +681,7 @@ SELECT
     '2023-04-15',
     'SVD',
     'live_birth',
-    120,    -- below viable threshold
+    120, -- below viable threshold
     38,
     'paper_CIF'
 FROM patient p
@@ -703,8 +701,8 @@ SELECT
     'live_birth',
     3100,
     39,
-    'positive',   -- baby positive
-    'negative',   -- but mother negative: MTCT contradiction
+    'positive', -- baby positive
+    'negative', -- but mother negative: MTCT contradiction
     'KenyaEMR'
 FROM patient p
 WHERE p.sex = 'female'
@@ -824,9 +822,9 @@ LIMIT 300;
 INSERT INTO stock_record (facility_id, commodity_id, record_date, opening_balance,
                           received_qty, dispensed_qty, losses_adjustments,
                           closing_balance, days_out_of_stock, data_source) VALUES
-((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 1, '2023-10-31', 1200, 500, 600, 20, 900,  0, 'DHIS2'),  -- correct is 1080, entered 900
-((SELECT facility_id FROM facility WHERE mfl_code = '14901'), 2, '2023-10-31', 800,  300, 400, 10, 1200, 0, 'DHIS2'),  -- correct is 690, entered 1200
-((SELECT facility_id FROM facility WHERE mfl_code = '18001'), 1, '2023-10-31', 2000, 0,   950, 50, 500,  0, 'DHIS2');  -- correct is 1000, entered 500
+((SELECT facility_id FROM facility WHERE mfl_code = '14880'), 1, '2023-10-31', 1200, 500, 600, 20, 900,  0, 'DHIS2'), -- correct is 1080, entered 900
+((SELECT facility_id FROM facility WHERE mfl_code = '14901'), 2, '2023-10-31', 800,  300, 400, 10, 1200, 0, 'DHIS2'), -- correct is 690, entered 1200
+((SELECT facility_id FROM facility WHERE mfl_code = '18001'), 1, '2023-10-31', 2000, 0,   950, 50, 500,  0, 'DHIS2'); -- correct is 1000, entered 500
 
 -- [DQ: PLAUSIBILITY] Days out of stock = 45 (impossible for a monthly record)
 INSERT INTO stock_record (facility_id, commodity_id, record_date, opening_balance,
@@ -866,7 +864,7 @@ LIMIT 120;
 INSERT INTO chw_service_record (chw_id, service_date, service_type, outcome, data_source)
 SELECT
     chw_id,
-    '2023-04-01',    -- service was in April
+    '2023-04-01', -- service was in April
     'defaulter_tracing',
     'client_found',
     'mobile_CHW'

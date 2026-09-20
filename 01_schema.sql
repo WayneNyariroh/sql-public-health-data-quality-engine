@@ -33,21 +33,21 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm"; -- for fuzzy duplicate detection
 CREATE TYPE severity_level AS ENUM ('critical', 'high', 'medium', 'low', 'info');
 
 CREATE TYPE issue_status AS ENUM (
-    'open',        -- newly detected, not yet reviewed
-    'confirmed',   -- reviewed and confirmed as real issue
-    'resolved',    -- fix applied, issue closed
-    'waived',      -- acknowledged but accepted (e.g. data entry constraint)
+    'open', -- newly detected, not yet reviewed
+    'confirmed', -- reviewed and confirmed as real issue
+    'resolved', -- fix applied, issue closed
+    'waived', -- acknowledged but accepted (e.g. data entry constraint)
     'false_positive' -- check fired but data is actually correct
 );
 
 CREATE TYPE check_category AS ENUM (
-    'completeness',     -- missing required fields
-    'validity',         -- values outside expected ranges/codes
-    'consistency',      -- logical contradictions between fields
-    'timeliness',       -- data submitted outside acceptable windows
-    'uniqueness',       -- duplicate records
-    'referential',      -- broken foreign-key-style relationships
-    'plausibility'      -- statistically unlikely but not strictly invalid
+    'completeness', -- missing required fields
+    'validity', -- values outside expected ranges/codes
+    'consistency', -- logical contradictions between fields
+    'timeliness', -- data submitted outside acceptable windows
+    'uniqueness', -- duplicate records
+    'referential', -- broken foreign-key-style relationships
+    'plausibility' -- statistically unlikely but not strictly invalid
 );
 
 CREATE TYPE sex_type AS ENUM ('male', 'female', 'intersex', 'unknown');
@@ -68,7 +68,7 @@ CREATE TYPE data_source AS ENUM ('DHIS2', 'KenyaEMR', 'KHIS', 'OpenMRS', 'paper_
 CREATE TABLE county (
     county_id        SMALLINT PRIMARY KEY,
     county_name      VARCHAR(60) NOT NULL,
-    region           VARCHAR(40),          -- e.g. Nyanza, Coast, Central
+    region           VARCHAR(40), -- e.g. Nyanza, Coast, Central
     created_at       TIMESTAMPTZ DEFAULT now()
 );
 
@@ -82,16 +82,16 @@ CREATE TABLE sub_county (
 -- Master Facility List (MFL), the reference for facility identity.
 CREATE TABLE facility (
     facility_id       SERIAL PRIMARY KEY,
-    mfl_code          VARCHAR(10) UNIQUE NOT NULL,   -- official MFL code e.g. "14880"
+    mfl_code          VARCHAR(10) UNIQUE NOT NULL, -- official MFL code e.g. "14880"
     facility_name     VARCHAR(120) NOT NULL,
-    facility_type     VARCHAR(40),                   -- hospital, health centre, dispensary, etc.
-    ownership         VARCHAR(30),                   -- public, faith-based, private, NGO
+    facility_type     VARCHAR(40), -- hospital, health centre, dispensary, etc.
+    ownership         VARCHAR(30), -- public, faith-based, private, NGO
     sub_county_id     SMALLINT REFERENCES sub_county(sub_county_id),
     county_id         SMALLINT REFERENCES county(county_id),
     latitude          NUMERIC(9,6),
     longitude         NUMERIC(9,6),
     is_active         BOOLEAN DEFAULT TRUE,
-    dhis2_org_unit    VARCHAR(20),                  -- DHIS2 organisation unit UID
+    dhis2_org_unit    VARCHAR(20), -- DHIS2 organisation unit UID
     opened_date       DATE,
     closed_date       DATE,
     created_at        TIMESTAMPTZ DEFAULT now(),
@@ -101,7 +101,7 @@ CREATE TABLE facility (
 -- ICD-10/SNOMED concept codes used across the domain
 CREATE TABLE concept_code (
     code_id      SERIAL PRIMARY KEY,
-    code_system  VARCHAR(20) NOT NULL,  -- 'ICD10', 'SNOMED', 'CIEL', 'LOINC'
+    code_system  VARCHAR(20) NOT NULL, -- 'ICD10', 'SNOMED', 'CIEL', 'LOINC'
     code         VARCHAR(20) NOT NULL,
     description  TEXT,
     UNIQUE(code_system, code)
@@ -115,7 +115,7 @@ CREATE TABLE concept_code (
 CREATE TABLE patient (
     patient_id        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     facility_id       INT NOT NULL REFERENCES facility(facility_id),
-    nupi_number       VARCHAR(20) UNIQUE,            -- National Unique Patient Identifier
+    nupi_number       VARCHAR(20) UNIQUE, -- National Unique Patient Identifier
     date_of_birth     DATE,
     sex               sex_type NOT NULL DEFAULT 'unknown',
     county_of_birth   SMALLINT REFERENCES county(county_id),
@@ -146,11 +146,11 @@ CREATE TABLE art_enrollment (
     patient_id          UUID NOT NULL REFERENCES patient(patient_id),
     facility_id         INT NOT NULL REFERENCES facility(facility_id),
     art_start_date      DATE NOT NULL,
-    entry_point         VARCHAR(60),     -- VCT, PMTCT, TB/HIV, inpatient, OPD, etc.
+    entry_point         VARCHAR(60), -- VCT, PMTCT, TB/HIV, inpatient, OPD, VMMC.
     who_stage_at_start  SMALLINT CHECK (who_stage_at_start BETWEEN 1 AND 4),
-    cd4_at_start        NUMERIC(6,1),   -- cells/µL
-    weight_at_start     NUMERIC(5,1),   -- kg
-    height_at_start     NUMERIC(5,1),   -- cm (needed for paediatric weight-for-height)
+    cd4_at_start        NUMERIC(6,1), -- cells/µL
+    weight_at_start     NUMERIC(5,1), -- kg
+    height_at_start     NUMERIC(5,1), -- cm (needed for paediatric weight-for-height)
     initial_regimen     art_regimen,
     is_active           BOOLEAN DEFAULT TRUE,
     created_at          TIMESTAMPTZ DEFAULT now()
@@ -164,9 +164,9 @@ CREATE TABLE viral_load (
     enrollment_id       UUID REFERENCES art_enrollment(enrollment_id),
     sample_date         DATE NOT NULL,
     result_date         DATE,
-    vl_result           NUMERIC(10,2),  -- copies/mL; NULL means LDL (below detection)
+    vl_result           NUMERIC(10,2), -- copies/mL; NULL means LDL (below detection)
     is_ldl              BOOLEAN DEFAULT FALSE, -- Low/Detectable Level flag
-    vl_category         VARCHAR(20)     -- 'suppressed', 'unsuppressed', 'high_vl'
+    vl_category         VARCHAR(20) -- 'suppressed', 'unsuppressed', 'high_vl'
         CHECK (vl_category IN ('suppressed', 'unsuppressed', 'high_vl', NULL)),
     ordering_clinician  VARCHAR(80),
     lab_name            VARCHAR(80),
@@ -186,7 +186,7 @@ CREATE TABLE art_visit (
     next_appointment    DATE,
     weight_kg           NUMERIC(5,1),
     current_regimen     art_regimen,
-    days_dispensed      SMALLINT,       -- number of days of medication dispensed
+    days_dispensed      SMALLINT, -- number of days of medication dispensed
     adherence_score     SMALLINT CHECK (adherence_score BETWEEN 0 AND 100),
     clinician_notes     TEXT,
     data_source         data_source DEFAULT 'KenyaEMR',
@@ -210,7 +210,7 @@ CREATE TABLE tb_case (
     tb_case_id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     patient_id          UUID REFERENCES patient(patient_id), -- nullable if not linked
     facility_id         INT NOT NULL REFERENCES facility(facility_id),
-    case_number         VARCHAR(20),                        -- district TB number
+    case_number         VARCHAR(20), -- district TB number
     notification_date   DATE NOT NULL,
     diagnosis_date      DATE,
     case_type           tb_case_type DEFAULT 'new',
@@ -247,7 +247,7 @@ CREATE TABLE anc_visit (
     anc_visit_number    SMALLINT CHECK (anc_visit_number BETWEEN 1 AND 12),
     gestational_age_wks SMALLINT CHECK (gestational_age_wks BETWEEN 4 AND 44),
     weight_kg           NUMERIC(5,1),
-    muac_cm             NUMERIC(4,1),   -- mid-upper arm circumference
+    muac_cm             NUMERIC(4,1), -- mid-upper arm circumference
     systolic_bp         SMALLINT,
     diastolic_bp        SMALLINT,
     hiv_test_done       BOOLEAN DEFAULT FALSE,
@@ -306,7 +306,7 @@ CREATE TABLE chw_service_record (
     chw_id              UUID NOT NULL REFERENCES chw(chw_id),
     patient_id          UUID REFERENCES patient(patient_id),
     service_date        DATE NOT NULL,
-    service_type        VARCHAR(40),   -- 'household_visit', 'referral', 'defaulter_tracing', etc.
+    service_type        VARCHAR(40), -- 'household_visit', 'referral', 'defaulter_tracing', etc.
     outcome             VARCHAR(40),
     gps_latitude        NUMERIC(9,6),
     gps_longitude       NUMERIC(9,6),
@@ -324,12 +324,12 @@ CREATE TABLE aggregate_report (
     facility_id         INT NOT NULL REFERENCES facility(facility_id),
     period_type         VARCHAR(10) CHECK (period_type IN ('monthly', 'quarterly', 'annual')),
     period_year         SMALLINT NOT NULL,
-    period_month        SMALLINT CHECK (period_month BETWEEN 1 AND 12),  -- NULL for quarterly/annual
+    period_month        SMALLINT CHECK (period_month BETWEEN 1 AND 12), -- NULL for quarterly/annual
     period_quarter      SMALLINT CHECK (period_quarter BETWEEN 1 AND 4), -- NULL for monthly
-    indicator_code      VARCHAR(40) NOT NULL,   -- e.g. 'HTS_TST', 'TX_CURR', 'TB_NOTIF'
+    indicator_code      VARCHAR(40) NOT NULL, -- e.g. 'HTS_TST', 'TX_CURR', 'TB_NOTIF'
     numerator           NUMERIC(10,2),
     denominator         NUMERIC(10,2),
-    value               NUMERIC(10,2),          -- computed or directly entered
+    value               NUMERIC(10,2), -- computed or directly entered
     submission_date     TIMESTAMPTZ,
     submitted_by        VARCHAR(80),
     data_source         data_source DEFAULT 'DHIS2',
@@ -350,9 +350,9 @@ CREATE TABLE aggregate_report (
 CREATE TABLE commodity (
     commodity_id    SERIAL PRIMARY KEY,
     commodity_name  VARCHAR(120) NOT NULL,
-    category        VARCHAR(30),  -- 'ARV', 'vaccine', 'test_kit', 'OI_drug', 'consumable'
-    unit            VARCHAR(20),  -- 'tablets', 'vials', 'doses', 'packs'
-    is_tracer       BOOLEAN DEFAULT FALSE  -- key tracer medicines (e.g. TLD, BCG)
+    category        VARCHAR(30), -- 'ARV', 'vaccine', 'test_kit', 'OI_drug', 'consumable'
+    unit            VARCHAR(20), -- 'tablets', 'vials', 'doses', 'packs'
+    is_tracer       BOOLEAN DEFAULT FALSE -- key tracer medicines (e.g. TLD, BCG)
 );
 
 CREATE TABLE stock_record (
@@ -418,18 +418,18 @@ CREATE TABLE data_quality_issue (
     severity            severity_level NOT NULL,
 
     -- Where the problem lives
-    source_table        VARCHAR(60) NOT NULL,     -- e.g. 'art_enrollment'
-    source_column       VARCHAR(60),              -- specific column, if applicable
-    record_id           TEXT,                     -- PK of the offending record (text for flexibility)
+    source_table        VARCHAR(60) NOT NULL, -- e.g. 'art_enrollment'
+    source_column       VARCHAR(60), -- specific column, if applicable
+    record_id           TEXT, -- PK of the offending record (text for flexibility)
 
     -- Facility / geography context
     facility_id         INT REFERENCES facility(facility_id),
     county_id           SMALLINT REFERENCES county(county_id),
 
     -- Human-readable description
-    issue_description   TEXT NOT NULL,            -- templated message from the check
-    raw_value           TEXT,                     -- the actual bad value captured
-    expected_value      TEXT,                     -- what was expected (range, format, etc.)
+    issue_description   TEXT NOT NULL, -- templated message from the check
+    raw_value           TEXT, -- the actual bad value captured
+    expected_value      TEXT, -- what was expected (range, format, etc.)
 
     -- Resolution tracking
     status              issue_status DEFAULT 'open',
@@ -438,9 +438,9 @@ CREATE TABLE data_quality_issue (
     resolution_notes    TEXT,
 
     -- Automated context
-    check_run_id        UUID,                     -- groups all issues from a single engine run
+    check_run_id        UUID, -- groups all issues from a single engine run
     data_source         data_source,
-    period_year         SMALLINT,                 -- reporting period context, if applicable
+    period_year         SMALLINT, -- reporting period context, if applicable
     period_month        SMALLINT,
 
     -- Timestamps
@@ -499,7 +499,7 @@ CREATE TABLE dq_engine_run (
     run_id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     run_started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     run_completed_at    TIMESTAMPTZ,
-    triggered_by        VARCHAR(80) DEFAULT 'scheduled',   -- 'manual', 'scheduled', 'pipeline'
+    triggered_by        VARCHAR(80) DEFAULT 'scheduled', -- 'manual', 'scheduled', 'pipeline'
     checks_executed     INT DEFAULT 0,
     issues_found        INT DEFAULT 0,
     issues_resolved     INT DEFAULT 0,
@@ -518,8 +518,8 @@ CREATE TABLE dq_check_log (
     completed_at        TIMESTAMPTZ,
     records_scanned     INT DEFAULT 0,
     issues_raised       INT DEFAULT 0,
-    error_message       TEXT,    -- non-null if the check itself failed
-    sql_query           TEXT     -- the SQL that was executed (for debugging)
+    error_message       TEXT, -- non-null if the check itself failed
+    sql_query           TEXT -- the SQL that was executed (for debugging)
 );
 
 -- ---------------------------------------------------------------------------
@@ -564,10 +564,10 @@ GROUP BY 1, 2, 3, 4, 5;
 -- Trend view: issues detected per day, useful for monitoring dashboards
 CREATE VIEW vw_dq_daily_trend AS
 SELECT
-    DATE(detected_at)  AS detection_date,
+    DATE(detected_at) AS detection_date,
     check_category,
     severity,
-    COUNT(*)           AS issues_detected
+    COUNT(*) AS issues_detected
 FROM data_quality_issue
 GROUP BY 1, 2, 3
 ORDER BY 1 DESC;
@@ -578,10 +578,10 @@ SELECT
     cl.check_name,
     cl.check_category,
     cl.severity,
-    COUNT(cl.log_id)                                        AS total_runs,
+    COUNT(cl.log_id) AS total_runs,
     AVG(EXTRACT(EPOCH FROM (cl.completed_at - cl.started_at))) AS avg_duration_secs,
-    SUM(cl.records_scanned)                                 AS total_records_scanned,
-    SUM(cl.issues_raised)                                   AS total_issues_raised,
+    SUM(cl.records_scanned) AS total_records_scanned,
+    SUM(cl.issues_raised) AS total_issues_raised,
     ROUND(SUM(cl.issues_raised)::NUMERIC / NULLIF(SUM(cl.records_scanned), 0) * 100, 2) AS issue_rate_pct
 FROM dq_check_log cl
 GROUP BY 1, 2, 3;
