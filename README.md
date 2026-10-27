@@ -30,7 +30,6 @@ sql_ph_dq_engine/
 ├── 06_scheduled_job.sql         pg_cron setup + maintenance functions
 └── README.md                    What you are currently reading
 ```
-
 ---
 
 ## Data Flow
@@ -39,7 +38,7 @@ sql_ph_dq_engine/
 raw source records -> DQ engine -> data_quality_issue -> review / resolution
 ```
 
-The seed data loads into `raw`, where semantic constraints are intentionally absent so poor source data can be assessed. `public` retains reference data, DQ and audit records, and constrained canonical tables. This repository does not include a process that promotes reviewed raw records into those canonical tables.
+The seed data loads into `raw`, where semantic constraints are intentionally absent so that poor source data can be assessed. `public` retains reference data, DQ and audit records, and constrained canonical tables. This repository does not include a process that promotes reviewed raw records into those canonical tables.
 
 ## Quick Start
 
@@ -52,7 +51,7 @@ The seed data loads into `raw`, where semantic constraints are intentionally abs
 ### Run Order
 
 ```bash
-# 1. Create database
+# 1. Create the database
 createdb ph_data
 
 # 2. Load schema (creates constrained public tables and unconstrained raw staging tables)
